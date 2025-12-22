@@ -17,13 +17,12 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   List<CameraDescription> _cameras = const [];
   bool _initializing = true;
 
-  // TTS & Speech variables
   final FlutterTts _tts = FlutterTts();
   Timer? _speakTimer;
   final stt.SpeechToText _speech = stt.SpeechToText();
   bool _listening = false;
+  String _currentWords = "";
 
-  // Mock phrases (to be removed in Task 6)
   final List<String> _phrases = const [
     'There is a person',
     'There is a tree',
@@ -62,10 +61,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
       setState(() => _initializing = false);
 
-      // Start the Auto-Capture Loop (Task 4)
       _startPictureLoop();
 
-      // Start the temporary TTS loop (Mocking AI)
       Future.delayed(const Duration(seconds: 1), () {
         _startTtsLoop();
         _startListening();
@@ -80,22 +77,19 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   }
 
   void _startPictureLoop() {
-    // Runs every 5 seconds to take a photo
     _pictureTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       if (!mounted || _controller == null || !_controller!.value.isInitialized) return;
       if (_controller!.value.isTakingPicture) return;
 
       try {
         final XFile file = await _controller!.takePicture();
-        // LOGS for testing Task 4
-        debugPrint("📸 Auto-capture success: ${file.path}");
+        debugPrint("Auto-capture success: ${file.path}");
       } catch (e) {
         debugPrint("Error capturing photo: $e");
       }
     });
   }
 
-  // --- MOCK TTS LOGIC (Will be replaced in Task 6) ---
   void _startTtsLoop() {
     _speakTimer?.cancel();
     _speakTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
@@ -119,7 +113,6 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       }
     });
   }
-  // ---------------------------------------------------
 
   Future<void> _initSpeech() async {
     final available = await _speech.initialize(
@@ -150,7 +143,10 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       partialResults: true,
       pauseFor: const Duration(seconds: 2),
       onResult: (result) {
-        final command = result.recognizedWords.toLowerCase().trim();
+        setState(() {
+          _currentWords = result.recognizedWords;
+        });
+        final command = _currentWords.toLowerCase().trim();
         if (command.contains('close camera')) {
           _closeCamera();
         }
@@ -192,6 +188,27 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
                   fit: StackFit.expand,
                   children: [
                     CameraPreview(controller),
+                    Positioned(
+                      bottom: 100, // Above the "Close" button
+                      left: 20,
+                      right: 20,
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.black54, // Semi-transparent black
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          _currentWords.isEmpty ? "Listening..." : _currentWords,
+                          style: const TextStyle(
+                            color: Colors.white, 
+                            fontSize: 20, 
+                            fontWeight: FontWeight.bold
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
                     Positioned(
                       left: 16,
                       right: 16,
