@@ -40,7 +40,7 @@ From the project root:
 
 Note: iOS builds require a Mac + Xcode.
 
-## Voice Commands (MVP)
+## Voice Commands 
 
 While in the camera screen:
 
