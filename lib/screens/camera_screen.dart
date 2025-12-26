@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
+import '../services/api_client.dart';
+
 class CameraPreviewScreen extends StatefulWidget {
   const CameraPreviewScreen({super.key});
 
@@ -18,20 +20,24 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   bool _initializing = true;
 
   final FlutterTts _tts = FlutterTts();
-  Timer? _speakTimer;
   final stt.SpeechToText _speech = stt.SpeechToText();
   bool _listening = false;
   String _currentWords = "";
 
-  final List<String> _phrases = const [
-    'There is a person',
-    'There is a tree',
-    'There is a chair',
-  ];
+  // PVA-6 integration state
+  late final ApiClient _api;
+  bool _sending = false;
+  String _backendText = "";
 
   @override
   void initState() {
     super.initState();
+
+    // CHANGE THIS when testing on real phone:
+    // emulator: http://10.0.2.2:8000
+    // real phone: http://<YOUR_PC_IP>:8000
+    _api = ApiClient(baseUrl: 'http://10.0.2.2:8000');
+
     _initCamera();
     _setupTts();
     _initSpeech();
@@ -47,8 +53,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     try {
       _cameras = await availableCameras();
       final CameraDescription camera = _cameras.firstWhere(
-          (c) => c.lensDirection == CameraLensDirection.back,
-          orElse: () => _cameras.first);
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => _cameras.first,
+      );
 
       _controller = CameraController(
         camera,
@@ -61,12 +68,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
       setState(() => _initializing = false);
 
+      // PVA-6: auto capture + send loop
       _startPictureLoop();
-
-      Future.delayed(const Duration(seconds: 1), () {
-        _startTtsLoop();
-        _startListening();
-      });
     } catch (e) {
       if (!mounted) return;
       setState(() => _initializing = false);
@@ -77,41 +80,61 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   }
 
   void _startPictureLoop() {
+    _pictureTimer?.cancel();
+
     _pictureTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       if (!mounted || _controller == null || !_controller!.value.isInitialized) return;
       if (_controller!.value.isTakingPicture) return;
+      if (_sending) return; // don’t spam backend
 
       try {
         final XFile file = await _controller!.takePicture();
         debugPrint("Auto-capture success: ${file.path}");
+        await _sendToBackend(file);
       } catch (e) {
         debugPrint("Error capturing photo: $e");
       }
     });
   }
 
-  void _startTtsLoop() {
-    _speakTimer?.cancel();
-    _speakTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
-      if (!mounted) return;
-
-      if (_listening) {
-        await _speech.stop();
-        _listening = false;
-      }
-
-      final phrase = (_phrases.toList()..shuffle()).first;
-      try {
-        await _tts.stop();
-        await _tts.speak(phrase);
-      } catch (e) {
-        debugPrint('TTS error: $e');
-      }
-
-      if (mounted && !_listening) {
-        _startListening();
-      }
+  Future<void> _sendToBackend(XFile image) async {
+    setState(() {
+      _sending = true;
+      _backendText = "";
     });
+
+    try {
+      final prompt = _currentWords.trim();
+
+      Map<String, dynamic> json;
+      if (prompt.isNotEmpty) {
+        json = await _api.custom(image, prompt);
+      } else {
+        json = await _api.obstacles(image);
+      }
+
+      final resultText = (json['result'] ?? '').toString();
+
+      if (!mounted) return;
+      setState(() {
+        _backendText = resultText;
+      });
+
+      if (resultText.isNotEmpty) {
+        await _tts.stop();
+        await _tts.speak(resultText);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _backendText = 'Network error: $e';
+      });
+    } finally {
+      if (!mounted) return;
+      setState(() {
+        _sending = false;
+      });
+    }
   }
 
   Future<void> _initSpeech() async {
@@ -146,6 +169,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         setState(() {
           _currentWords = result.recognizedWords;
         });
+
         final command = _currentWords.toLowerCase().trim();
         if (command.contains('close camera')) {
           _closeCamera();
@@ -156,7 +180,6 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
   Future<void> _closeCamera() async {
     _pictureTimer?.cancel();
-    _speakTimer?.cancel();
     await _tts.stop();
     await _speech.stop();
 
@@ -167,7 +190,6 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   @override
   void dispose() {
     _pictureTimer?.cancel();
-    _speakTimer?.cancel();
     _tts.stop();
     _speech.stop();
     _controller?.dispose();
@@ -177,6 +199,17 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
+
+    String overlayText;
+    if (_sending) {
+      overlayText = "Processing...";
+    } else if (_backendText.isNotEmpty) {
+      overlayText = _backendText;
+    } else if (_currentWords.isEmpty) {
+      overlayText = "Listening...";
+    } else {
+      overlayText = _currentWords;
+    }
 
     return Scaffold(
       appBar: AppBar(title: const Text('Camera')),
@@ -188,27 +221,30 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
                   fit: StackFit.expand,
                   children: [
                     CameraPreview(controller),
+
+                    // subtitle / result overlay
                     Positioned(
-                      bottom: 100, // Above the "Close" button
+                      bottom: 100,
                       left: 20,
                       right: 20,
                       child: Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: Colors.black54, // Semi-transparent black
+                          color: Colors.black54,
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
-                          _currentWords.isEmpty ? "Listening..." : _currentWords,
+                          overlayText,
                           style: const TextStyle(
-                            color: Colors.white, 
-                            fontSize: 20, 
-                            fontWeight: FontWeight.bold
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
                           ),
                           textAlign: TextAlign.center,
                         ),
                       ),
                     ),
+
                     Positioned(
                       left: 16,
                       right: 16,
