@@ -6,6 +6,8 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/api_client.dart';
 
+enum _BackendMode { obstacles, crosswalk }
+
 class CameraPreviewScreen extends StatefulWidget {
   const CameraPreviewScreen({super.key});
 
@@ -24,19 +26,31 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   bool _listening = false;
   String _currentWords = "";
 
+  bool _autoScanEnabled = true;
+  _BackendMode _mode = _BackendMode.obstacles;
+  String _pendingPrompt = '';
+
   // PVA-6 integration state
   late final ApiClient _api;
   bool _sending = false;
   String _backendText = "";
 
+  DateTime _lastRequestAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastSpokenText = '';
+
+  static const Duration _captureInterval = Duration(seconds: 5);
+  static const Duration _minRequestGap = Duration(seconds: 6);
+  static const Duration _minSpeakGap = Duration(seconds: 4);
+
   @override
   void initState() {
     super.initState();
 
-    // CHANGE THIS when testing on real phone:
-    // emulator: http://10.0.2.2:8000
-    // real phone: http://<YOUR_PC_IP>:8000
-    _api = ApiClient(baseUrl: 'http://10.0.2.2:8000');
+    // Configure base URL with:
+    // `--dart-define=API_BASE_URL=http://10.0.2.2:8000` (Android emulator)
+    // `--dart-define=API_BASE_URL=http://<YOUR_PC_IP>:8000` (physical phone)
+    _api = ApiClient();
 
     _initCamera();
     _setupTts();
@@ -82,19 +96,28 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   void _startPictureLoop() {
     _pictureTimer?.cancel();
 
-    _pictureTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      if (!mounted || _controller == null || !_controller!.value.isInitialized) return;
-      if (_controller!.value.isTakingPicture) return;
-      if (_sending) return; // don’t spam backend
-
-      try {
-        final XFile file = await _controller!.takePicture();
-        debugPrint("Auto-capture success: ${file.path}");
-        await _sendToBackend(file);
-      } catch (e) {
-        debugPrint("Error capturing photo: $e");
-      }
+    _pictureTimer = Timer.periodic(_captureInterval, (_) async {
+      if (!_autoScanEnabled) return;
+      await _captureAndSendOnce();
     });
+  }
+
+  Future<void> _captureAndSendOnce() async {
+    if (!mounted || _controller == null || !_controller!.value.isInitialized) return;
+    if (_controller!.value.isTakingPicture) return;
+    if (_sending) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastRequestAt) < _minRequestGap) return;
+
+    try {
+      _lastRequestAt = now;
+      final XFile file = await _controller!.takePicture();
+      debugPrint('Capture success: ${file.path}');
+      await _sendToBackend(file);
+    } catch (e) {
+      debugPrint('Error capturing photo: $e');
+    }
   }
 
   Future<void> _sendToBackend(XFile image) async {
@@ -104,36 +127,68 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     });
 
     try {
-      final prompt = _currentWords.trim();
+      final prompt = _pendingPrompt.trim();
 
       Map<String, dynamic> json;
       if (prompt.isNotEmpty) {
-        json = await _api.custom(image, prompt);
+        json = await _api.sendCustom(image, prompt);
+      } else if (_mode == _BackendMode.crosswalk) {
+        json = await _api.sendCrosswalk(image);
       } else {
-        json = await _api.obstacles(image);
+        json = await _api.sendObstacles(image);
       }
 
-      final resultText = (json['result'] ?? '').toString();
+      // Reset one-shot intent after using it.
+      _pendingPrompt = '';
+      _mode = _BackendMode.obstacles;
+
+      final resultText = (json['result'] ?? '').toString().trim();
 
       if (!mounted) return;
       setState(() {
         _backendText = resultText;
       });
 
-      if (resultText.isNotEmpty) {
-        await _tts.stop();
-        await _tts.speak(resultText);
-      }
+      await _speakIfNeeded(resultText);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _backendText = e.message;
+      });
+      await _speakIfNeeded(e.message);
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _backendText = 'Network error: $e';
+        _backendText = 'Unexpected error: $e';
       });
+      await _speakIfNeeded('Unexpected error');
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _sending = false;
-      });
+      if (mounted) {
+        setState(() {
+          _sending = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _speakIfNeeded(String text) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+
+    // Avoid repeating the same message every scan.
+    if (clean == _lastSpokenText) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastSpokenAt) < _minSpeakGap) return;
+
+    _lastSpokenAt = now;
+    _lastSpokenText = clean;
+
+    try {
+      await _tts.stop();
+      await _tts.speak(clean);
+    } catch (_) {
+      // Ignore TTS failures; UI still shows the text.
     }
   }
 
@@ -141,14 +196,14 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     final available = await _speech.initialize(
       onStatus: (status) {
         if (status == 'notListening' && mounted) {
-          _listening = false;
-          Future.delayed(const Duration(milliseconds: 200), () {
+          setState(() => _listening = false);
+          Future.delayed(const Duration(milliseconds: 250), () {
             if (mounted) _startListening();
           });
         }
       },
       onError: (error) {
-        _listening = false;
+        if (mounted) setState(() => _listening = false);
         Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted) _startListening();
         });
@@ -158,24 +213,100 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   }
 
   Future<void> _startListening() async {
-    if (_listening) return;
-    _listening = true;
+    if (_listening || _speech.isListening) return;
+    setState(() => _listening = true);
 
-    await _speech.listen(
-      listenMode: stt.ListenMode.dictation,
-      partialResults: true,
-      pauseFor: const Duration(seconds: 2),
-      onResult: (result) {
-        setState(() {
-          _currentWords = result.recognizedWords;
-        });
+    try {
+      await _speech.listen(
+        listenOptions: stt.SpeechListenOptions(
+          listenMode: stt.ListenMode.dictation,
+          partialResults: true,
+        ),
+        pauseFor: const Duration(seconds: 2),
+        onResult: (result) {
+          if (!mounted) return;
 
-        final command = _currentWords.toLowerCase().trim();
-        if (command.contains('close camera')) {
-          _closeCamera();
-        }
-      },
-    );
+          final words = result.recognizedWords;
+          setState(() => _currentWords = words);
+
+          if (result.finalResult) {
+            _handleFinalSpeech(words);
+          }
+        },
+      );
+    } catch (_) {
+      if (mounted) setState(() => _listening = false);
+    }
+  }
+
+  void _handleFinalSpeech(String words) {
+    final command = words.toLowerCase().trim();
+    if (command.isEmpty) return;
+
+    if (command.contains('close camera')) {
+      _closeCamera();
+      return;
+    }
+
+    if (command.contains('pause scanning') || command.contains('stop scanning')) {
+      setState(() {
+        _autoScanEnabled = false;
+        _backendText = 'Scanning paused';
+      });
+      _speakIfNeeded('Scanning paused');
+      return;
+    }
+
+    if (command.contains('resume scanning') || command.contains('start scanning')) {
+      setState(() {
+        _autoScanEnabled = true;
+        _backendText = 'Scanning resumed';
+      });
+      _speakIfNeeded('Scanning resumed');
+      _captureAndSendOnce();
+      return;
+    }
+
+    if (command.contains('crosswalk') || command.contains('cross walk')) {
+      _mode = _BackendMode.crosswalk;
+      _pendingPrompt = '';
+      setState(() {
+        _backendText = 'Checking crosswalk...';
+      });
+      _captureAndSendOnce();
+      return;
+    }
+
+    // Treat final speech as a question only when it looks like one.
+    if (_looksLikeQuestion(command)) {
+      _pendingPrompt = words.trim();
+      _mode = _BackendMode.obstacles;
+      setState(() {
+        _backendText = 'Asking...';
+      });
+      _captureAndSendOnce();
+    }
+  }
+
+  bool _looksLikeQuestion(String lower) {
+    const starters = [
+      'what',
+      'where',
+      'who',
+      'when',
+      'why',
+      'how',
+      'is',
+      'are',
+      'do',
+      'does',
+      'can',
+      'could',
+      'should',
+      'tell me',
+      'describe',
+    ];
+    return starters.any(lower.startsWith);
   }
 
   Future<void> _closeCamera() async {
@@ -205,6 +336,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       overlayText = "Processing...";
     } else if (_backendText.isNotEmpty) {
       overlayText = _backendText;
+    } else if (!_autoScanEnabled) {
+      overlayText = 'Scanning paused';
     } else if (_currentWords.isEmpty) {
       overlayText = "Listening...";
     } else {

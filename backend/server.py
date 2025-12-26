@@ -1,10 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
+from typing import Optional
 import uvicorn
 
 app = FastAPI(title="Scene Assistant Backend")
 
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/jpg"}
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png"}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB
 
 
 @app.get("/health")
@@ -12,16 +14,29 @@ def health_check():
     return {"status": "OK", "message": "Server is running smoothly"}
 
 
-def validate_image(file: UploadFile):
+async def validate_image(file: Optional[UploadFile]) -> None:
+    # NOTE: Accepting File(None) lets us return 400 (contract) instead of 422.
     if file is None:
         raise HTTPException(status_code=400, detail="Missing file")
+
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="File must be an image")
 
+    # Basic size guardrail (prevents accidental huge uploads).
+    # Reads the file into memory for MVP; replace with streaming if needed later.
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Missing file")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Image too large")
+
+    # Reset for downstream consumers that may need to read again.
+    await file.seek(0)
+
 
 @app.post("/obstacles")
-async def obstacles(file: UploadFile = File(...)):
-    validate_image(file)
+async def obstacles(file: Optional[UploadFile] = File(None)):
+    await validate_image(file)
 
     # TODO: Replace with real AI call
     return JSONResponse(
@@ -33,8 +48,8 @@ async def obstacles(file: UploadFile = File(...)):
 
 
 @app.post("/crosswalk")
-async def crosswalk(file: UploadFile = File(...)):
-    validate_image(file)
+async def crosswalk(file: Optional[UploadFile] = File(None)):
+    await validate_image(file)
 
     # TODO: Replace with real AI call
     return JSONResponse(
@@ -46,10 +61,10 @@ async def crosswalk(file: UploadFile = File(...)):
 
 
 @app.post("/custom")
-async def custom(file: UploadFile = File(...), prompt: str = Form(...)):
-    validate_image(file)
+async def custom(file: Optional[UploadFile] = File(None), prompt: Optional[str] = Form(None)):
+    await validate_image(file)
 
-    if not prompt or not prompt.strip():
+    if prompt is None or not prompt.strip():
         raise HTTPException(status_code=400, detail="Missing prompt")
 
     clean_prompt = prompt.strip()

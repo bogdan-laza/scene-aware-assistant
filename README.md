@@ -1,15 +1,53 @@
-# scene\_aware\_assistant\_app
+# scene_aware_assistant_app
 
+Scene-aware assistant (Flutter + FastAPI).
 
+## Prerequisites
 
-To run this project:
+- Flutter SDK installed and on PATH
+- Android Studio installed (for Android SDK + emulator)
+- Python 3.9+ installed (for backend)
 
+## Backend (FastAPI)
 
+From the project root:
 
-1. Open a terminal and go to the folder where you want to download the project.
-2. Clone the repo: git clone: https://github.com/bogdan-laza/scene-aware-assistant.git
-3. Navigate to the newly downloaded project: cd scene-aware-assistant
-4. If you want to open it in VS code: code .
-5. If you do not have flutter installed you firstly need to download and install flutter
-6. After that download the dependencies in the same terminal: flutter pub get
-7. You can connect your phone or use an emulator and run it: flutter pub get (for a good experience make sure your ringtone volume is muted and your media volume up)
+1. Install backend dependencies:
+	- `python -m pip install -r backend/requirements.txt`
+	  - Includes `python-multipart` (required for `multipart/form-data` uploads)
+2. Run the backend:
+	- `python backend/server.py`
+
+Health check:
+- `GET http://127.0.0.1:8000/health`
+
+## Mobile App (Flutter)
+
+From the project root:
+
+1. Install dependencies:
+	- `flutter pub get`
+
+2. Run on Android emulator:
+	- Start an emulator in Android Studio (Device Manager)
+	- Run:
+	  - `flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000`
+
+3. Run on a physical Android phone (same WiFi as your PC):
+	- Find your PC's LAN IP (example: `192.168.1.50`)
+	- Run:
+	  - `flutter run --dart-define=API_BASE_URL=http://192.168.1.50:8000`
+
+Note: iOS builds require a Mac + Xcode.
+
+## Voice Commands (MVP)
+
+While in the camera screen:
+
+- "close camera" → exits camera
+- "pause scanning" / "stop scanning" → pauses auto scanning
+- "resume scanning" / "start scanning" → resumes auto scanning
+- "crosswalk" → runs crosswalk analysis on the next capture
+
+Custom questions:
+- Ask a question starting with words like "what", "where", "how", "describe", "tell me" to trigger the `/custom` endpoint.

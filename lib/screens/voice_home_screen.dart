@@ -48,8 +48,11 @@ class _VoiceHomeScreenState extends State<VoiceHomeScreen> {
     setState(() => _listening = true);
 
     await _speech.listen(
-      listenMode: stt.ListenMode.dictation,
-      partialResults: true,
+      listenOptions: stt.SpeechListenOptions(
+        listenMode: stt.ListenMode.dictation,
+        partialResults: true,
+        cancelOnError: false,
+      ),
       onResult: (result) async {
         final recognized = result.recognizedWords.toLowerCase().trim();
         if (!mounted) return;
@@ -62,7 +65,6 @@ class _VoiceHomeScreenState extends State<VoiceHomeScreen> {
           _navigateToCamera();
         }
       },
-      cancelOnError: false,
       listenFor: const Duration(minutes: 10),
       pauseFor: const Duration(seconds: 60),
     );
