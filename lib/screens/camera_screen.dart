@@ -6,7 +6,7 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/api_client.dart';
 
-enum _BackendMode { obstacles, crosswalk }
+enum ScanMode { obstacles, crosswalk, custom }
 
 class CameraPreviewScreen extends StatefulWidget {
   const CameraPreviewScreen({super.key});
@@ -26,9 +26,15 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   bool _listening = false;
   String _currentWords = "";
 
+  DateTime _speechMutedUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
   bool _autoScanEnabled = true;
-  _BackendMode _mode = _BackendMode.obstacles;
+  ScanMode _mode = ScanMode.obstacles;
+  bool _autoScanBeforeCustom = true;
   String _pendingPrompt = '';
+
+  static const String _offlineMessage =
+      "I can’t analyze the scene right now. Please check your connection.";
 
   // PVA-6 integration state
   late final ApiClient _api;
@@ -42,6 +48,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   static const Duration _captureInterval = Duration(seconds: 5);
   static const Duration _minRequestGap = Duration(seconds: 6);
   static const Duration _minSpeakGap = Duration(seconds: 4);
+  static const Duration _sttMuteAfterTts = Duration(milliseconds: 700);
 
   @override
   void initState() {
@@ -82,7 +89,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
       setState(() => _initializing = false);
 
-      // PVA-6: auto capture + send loop
+      //  auto capture + send loop
       _startPictureLoop();
     } catch (e) {
       if (!mounted) return;
@@ -98,6 +105,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
     _pictureTimer = Timer.periodic(_captureInterval, (_) async {
       if (!_autoScanEnabled) return;
+      if (_mode == ScanMode.custom) return;
       await _captureAndSendOnce();
     });
   }
@@ -130,38 +138,51 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       final prompt = _pendingPrompt.trim();
 
       Map<String, dynamic> json;
-      if (prompt.isNotEmpty) {
+      if (_mode == ScanMode.custom) {
+        if (prompt.isEmpty) {
+          // In custom mode we require an explicit prompt.
+          throw ApiException('Missing prompt', statusCode: 400);
+        }
         json = await _api.sendCustom(image, prompt);
-      } else if (_mode == _BackendMode.crosswalk) {
+      } else if (_mode == ScanMode.crosswalk) {
         json = await _api.sendCrosswalk(image);
       } else {
         json = await _api.sendObstacles(image);
       }
 
-      // Reset one-shot intent after using it.
+      // Custom mode is one-shot: it resets after one answer.
       _pendingPrompt = '';
-      _mode = _BackendMode.obstacles;
+      if (_mode == ScanMode.custom) {
+        _mode = ScanMode.obstacles;
+        _autoScanEnabled = _autoScanBeforeCustom;
+      }
 
       final resultText = (json['result'] ?? '').toString().trim();
+
+      // Optional: confidence indicator (0..1)
+      final confidence = json['confidence'];
+      final spoken = _formatSpokenResult(resultText, confidence);
 
       if (!mounted) return;
       setState(() {
         _backendText = resultText;
       });
 
-      await _speakIfNeeded(resultText);
+      await _speakIfNeeded(spoken);
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
-        _backendText = e.message;
+        _backendText = _offlineMessage;
       });
-      await _speakIfNeeded(e.message);
+      debugPrint('API error: ${e.message}');
+      await _speakIfNeeded(_offlineMessage);
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _backendText = 'Unexpected error: $e';
+        _backendText = _offlineMessage;
       });
-      await _speakIfNeeded('Unexpected error');
+      debugPrint('Unexpected error: $e');
+      await _speakIfNeeded(_offlineMessage);
     } finally {
       if (mounted) {
         setState(() {
@@ -169,6 +190,20 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         });
       }
     }
+  }
+
+  String _formatSpokenResult(String resultText, Object? confidence) {
+    final clean = resultText.trim();
+    if (clean.isEmpty) return clean;
+
+    final value = (confidence is num) ? confidence.toDouble() : null;
+    if (value == null) return clean;
+
+    // MVP phrasing: add uncertainty for low confidence.
+    if (value < 0.7) {
+      return 'I might be wrong, but $clean';
+    }
+    return clean;
   }
 
   Future<void> _speakIfNeeded(String text) async {
@@ -185,11 +220,37 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     _lastSpokenText = clean;
 
     try {
+      await _stopListeningForTts();
       await _tts.stop();
       await _tts.speak(clean);
+      _speechMutedUntil = DateTime.now().add(_sttMuteAfterTts);
+      _scheduleListeningResume();
     } catch (_) {
       // Ignore TTS failures; UI still shows the text.
     }
+  }
+
+  Future<void> _stopListeningForTts() async {
+    try {
+      await _speech.stop();
+    } catch (_) {
+      // ignore
+    }
+    if (mounted) setState(() => _listening = false);
+  }
+
+  void _scheduleListeningResume() {
+    if (!mounted) return;
+    if (_mode == ScanMode.custom) {
+      // We still want listening in custom mode to capture the question.
+    }
+    final now = DateTime.now();
+    final delay = _speechMutedUntil.isAfter(now)
+        ? _speechMutedUntil.difference(now)
+        : Duration.zero;
+    Future.delayed(delay, () {
+      if (mounted) _startListening();
+    });
   }
 
   Future<void> _initSpeech() async {
@@ -197,22 +258,19 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       onStatus: (status) {
         if (status == 'notListening' && mounted) {
           setState(() => _listening = false);
-          Future.delayed(const Duration(milliseconds: 250), () {
-            if (mounted) _startListening();
-          });
+          _scheduleListeningResume();
         }
       },
       onError: (error) {
         if (mounted) setState(() => _listening = false);
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (mounted) _startListening();
-        });
+        _scheduleListeningResume();
       },
     );
     if (available && mounted) _startListening();
   }
 
   Future<void> _startListening() async {
+    if (DateTime.now().isBefore(_speechMutedUntil)) return;
     if (_listening || _speech.isListening) return;
     setState(() => _listening = true);
 
@@ -267,46 +325,48 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       return;
     }
 
-    if (command.contains('crosswalk') || command.contains('cross walk')) {
-      _mode = _BackendMode.crosswalk;
-      _pendingPrompt = '';
+    if (command.contains('obstacle mode') || command.contains('obstacles mode')) {
       setState(() {
-        _backendText = 'Checking crosswalk...';
+        _mode = ScanMode.obstacles;
+        _backendText = 'Obstacle mode';
       });
-      _captureAndSendOnce();
+      _speakIfNeeded('Obstacle mode');
       return;
     }
 
-    // Treat final speech as a question only when it looks like one.
-    if (_looksLikeQuestion(command)) {
+    if (command.contains('crosswalk mode') ||
+        command.contains('cross walk mode') ||
+        command == 'crosswalk') {
+      setState(() {
+        _mode = ScanMode.crosswalk;
+        _backendText = 'Crosswalk mode';
+      });
+      _speakIfNeeded('Crosswalk mode');
+      return;
+    }
+
+    if (command.contains('custom mode') ||
+        command.contains('question mode') ||
+        command.contains('ask question')) {
+      _autoScanBeforeCustom = _autoScanEnabled;
+      setState(() {
+        _mode = ScanMode.custom;
+        _pendingPrompt = '';
+        _autoScanEnabled = false;
+        _backendText = 'Custom mode: ask your question.';
+      });
+      _speakIfNeeded('Custom mode. Ask your question.');
+      return;
+    }
+
+    // In custom mode, any final speech that isn't a command becomes the prompt.
+    if (_mode == ScanMode.custom) {
       _pendingPrompt = words.trim();
-      _mode = _BackendMode.obstacles;
       setState(() {
         _backendText = 'Asking...';
       });
       _captureAndSendOnce();
     }
-  }
-
-  bool _looksLikeQuestion(String lower) {
-    const starters = [
-      'what',
-      'where',
-      'who',
-      'when',
-      'why',
-      'how',
-      'is',
-      'are',
-      'do',
-      'does',
-      'can',
-      'could',
-      'should',
-      'tell me',
-      'describe',
-    ];
-    return starters.any(lower.startsWith);
   }
 
   Future<void> _closeCamera() async {

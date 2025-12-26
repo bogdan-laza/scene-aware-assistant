@@ -47,7 +47,12 @@ While in the camera screen:
 - "close camera" → exits camera
 - "pause scanning" / "stop scanning" → pauses auto scanning
 - "resume scanning" / "start scanning" → resumes auto scanning
-- "crosswalk" → runs crosswalk analysis on the next capture
+
+Modes (predictable routing):
+
+- "obstacle mode" → routes captures to `/obstacles`
+- "crosswalk mode" → routes captures to `/crosswalk`
+- "custom mode" / "question mode" → next spoken phrase is sent to `/custom` (then resets)
 
 Custom questions:
 - Ask a question starting with words like "what", "where", "how", "describe", "tell me" to trigger the `/custom` endpoint.

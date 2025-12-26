@@ -32,7 +32,8 @@ Response (JSON):
 
 {
   "type": "obstacle_detection",
-  "result": "There is a potted plant directly in front of you and a chair to the left."
+  "result": "There is a potted plant directly in front of you and a chair to the left.",
+  "confidence": 0.65
 }
 
 
@@ -54,7 +55,8 @@ Response (JSON):
 
 {
   "type": "crosswalk_analysis",
-  "result": "Yes, there is a pedestrian crosswalk visible. It looks safe to cross."
+  "result": "Yes, there is a pedestrian crosswalk visible. It looks safe to cross.",
+  "confidence": 0.65
 }
 
 
@@ -79,7 +81,8 @@ Response (JSON):
 {
   "type": "custom_query",
   "prompt": "What color is the car?",
-  "result": "The car is red."
+  "result": "The car is red.",
+  "confidence": 0.65
 }
 
 

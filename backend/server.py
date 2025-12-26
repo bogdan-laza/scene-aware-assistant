@@ -23,7 +23,6 @@ async def validate_image(file: Optional[UploadFile]) -> None:
         raise HTTPException(status_code=400, detail="File must be an image")
 
     # Basic size guardrail (prevents accidental huge uploads).
-    # Reads the file into memory for MVP; replace with streaming if needed later.
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Missing file")
@@ -42,7 +41,8 @@ async def obstacles(file: Optional[UploadFile] = File(None)):
     return JSONResponse(
         content={
             "type": "obstacle_detection",
-            "result": "Obstacle detection not connected to AI yet."
+            "result": "Obstacle detection not connected to AI yet.",
+            "confidence": 0.65,
         }
     )
 
@@ -55,7 +55,8 @@ async def crosswalk(file: Optional[UploadFile] = File(None)):
     return JSONResponse(
         content={
             "type": "crosswalk_analysis",
-            "result": "Crosswalk detection not connected to AI yet."
+            "result": "Crosswalk detection not connected to AI yet.",
+            "confidence": 0.65,
         }
     )
 
@@ -74,7 +75,8 @@ async def custom(file: Optional[UploadFile] = File(None), prompt: Optional[str] 
         content={
             "type": "custom_query",
             "prompt": clean_prompt,
-            "result": f'Custom query not connected to AI yet. You asked: "{clean_prompt}"'
+            "result": f'Custom query not connected to AI yet. You asked: "{clean_prompt}"',
+            "confidence": 0.65,
         }
     )
 
