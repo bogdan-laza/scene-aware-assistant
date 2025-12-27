@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:camera/camera.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 class ApiException implements Exception {
   ApiException(this.message, {this.statusCode});
@@ -44,7 +45,7 @@ class ApiClient {
   /// Sends an image + prompt string to `/custom`.
   Future<Map<String, dynamic>> sendCustom(XFile file, String prompt) async {
     final request = http.MultipartRequest('POST', _uri('/custom'));
-    request.files.add(await http.MultipartFile.fromPath('file', file.path));
+    request.files.add(await _imagePart(file));
     request.fields['prompt'] = prompt;
 
     final streamed = await _client.send(request).timeout(_timeout);
@@ -59,7 +60,7 @@ class ApiClient {
 
   Future<Map<String, dynamic>> _sendImageOnly(String endpoint, XFile file) async {
     final request = http.MultipartRequest('POST', _uri(endpoint));
-    request.files.add(await http.MultipartFile.fromPath('file', file.path));
+    request.files.add(await _imagePart(file));
 
     final streamed = await _client.send(request).timeout(_timeout);
     final body = await streamed.stream.bytesToString();
@@ -91,6 +92,25 @@ class ApiClient {
     } catch (_) {
       return ApiException('Server error ($status)', statusCode: status);
     }
+  }
+
+  Future<http.MultipartFile> _imagePart(XFile file) async {
+    // package:http defaults to application/octet-stream; our backend validates
+    // content-type, so we must set it correctly.
+    final lower = file.path.toLowerCase();
+    final MediaType contentType;
+    if (lower.endsWith('.png')) {
+      contentType = MediaType('image', 'png');
+    } else {
+      // Treat .jpg/.jpeg/.heic and unknown as jpeg for MVP.
+      contentType = MediaType('image', 'jpeg');
+    }
+
+    return http.MultipartFile.fromPath(
+      'file',
+      file.path,
+      contentType: contentType,
+    );
   }
 
   // Backwards-compatible wrappers (internal use). Safe to remove later.

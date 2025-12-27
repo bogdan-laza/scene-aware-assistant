@@ -14,6 +14,7 @@ class _VoiceHomeScreenState extends State<VoiceHomeScreen> {
   final stt.SpeechToText _speech = stt.SpeechToText();
   bool _listening = false;
   String _lastHeard = '';
+  bool _suspendListening = false;
 
   @override
   void initState() {
@@ -26,17 +27,18 @@ class _VoiceHomeScreenState extends State<VoiceHomeScreen> {
 
     final available = await _speech.initialize(
       onStatus: (status) async {
+        if (!mounted || _suspendListening) return;
         if (status == 'notListening' && mounted && !_listening) {
           await Future.delayed(const Duration(milliseconds: 300));
+          if (!mounted || _suspendListening) return;
           _startListening();
         }
       },
       onError: (error) {
+        if (!mounted || _suspendListening) return;
         debugPrint('Speech error: $error');
-        if (mounted) {
-          setState(() => _listening = false);
-          _startListening();
-        }
+        setState(() => _listening = false);
+        _startListening();
       },
     );
 
@@ -44,6 +46,7 @@ class _VoiceHomeScreenState extends State<VoiceHomeScreen> {
   }
 
   Future<void> _startListening() async {
+    if (_suspendListening) return;
     if (_listening) return;
     setState(() => _listening = true);
 
@@ -54,13 +57,25 @@ class _VoiceHomeScreenState extends State<VoiceHomeScreen> {
         cancelOnError: false,
       ),
       onResult: (result) async {
+        if (!mounted || _suspendListening) return;
         final recognized = result.recognizedWords.toLowerCase().trim();
         if (!mounted) return;
 
         setState(() => _lastHeard = recognized);
 
         if (recognized.contains('open camera')) {
-          await _speech.stop();
+          _suspendListening = true;
+          try {
+            // cancel() is more aggressive than stop(): it releases resources and
+            // avoids "busy" loops when switching screens.
+            await _speech.cancel();
+          } catch (_) {
+            try {
+              await _speech.stop();
+            } catch (_) {
+              // ignore
+            }
+          }
           setState(() => _listening = false);
           _navigateToCamera();
         }
@@ -72,10 +87,30 @@ class _VoiceHomeScreenState extends State<VoiceHomeScreen> {
 
   Future<void> _navigateToCamera() async {
     if (!mounted) return;
+
+    // IMPORTANT (blind-user friendly): ensure only one STT instance holds the mic.
+    // If the camera is opened via tap, the home screen was previously still
+    // listening in the background, which prevents camera voice commands from
+    // working reliably.
+    _suspendListening = true;
+    try {
+      await _speech.cancel();
+    } catch (_) {
+      try {
+        await _speech.stop();
+      } catch (_) {
+        // ignore
+      }
+    }
+    if (mounted) setState(() => _listening = false);
+
+    if (!mounted) return;
+
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const CameraPreviewScreen()),
     );
     if (mounted) {
+      _suspendListening = false;
       setState(() => _listening = false);
       _startListening();
     }
