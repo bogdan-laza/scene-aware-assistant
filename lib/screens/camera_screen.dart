@@ -10,6 +10,8 @@ import '../services/api_client.dart';
 
 enum ScanMode { obstacles, crosswalk, custom }
 
+enum _SpeechKind { system, result, error }
+
 class CameraPreviewScreen extends StatefulWidget {
   const CameraPreviewScreen({super.key});
 
@@ -43,7 +45,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
   static const String _offlineMessage =
       "I can’t analyze the scene right now. Please check your connection.";
-    static const String _badRequestMessage =
+  static const String _badRequestMessage =
       "I couldn’t process the photo. Please try again.";
 
   // PVA-6 integration state
@@ -54,6 +56,14 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   DateTime _lastRequestAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastSpokenText = '';
+
+  // Serialize TTS so calls never overlap.
+  Future<void> _ttsChain = Future<void>.value();
+  _SpeechKind? _activeSpeechKind;
+  String? _queuedSystemUtterance;
+
+  DateTime _lastErrorSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastErrorText = '';
 
   static const Duration _captureInterval = Duration(seconds: 8);
   static const Duration _minRequestGap = Duration(seconds: 8);
@@ -105,9 +115,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _initializing = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Camera init failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Camera init failed: $e')));
     }
   }
 
@@ -123,11 +133,11 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   }
 
   Future<void> _captureAndSendOnce({bool force = false}) async {
-    if (_mode == ScanMode.custom && _pendingPrompt.isEmpty) {
-      return ; // NEVER  send in custom mode without a prompt
-    }
+    if (_mode == ScanMode.custom && _pendingPrompt.trim().isEmpty) return;
     if (_closing) return;
-    if (!mounted || _controller == null || !_controller!.value.isInitialized) return;
+    if (!mounted || _controller == null || !_controller!.value.isInitialized) {
+      return;
+    }
     if (_controller!.value.isTakingPicture) return;
     if (_sending || _captureInFlight) return;
 
@@ -139,7 +149,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       _lastRequestAt = now;
       final XFile file = await _controller!.takePicture();
       debugPrint('Capture success: ${file.path}');
-      await _scanFeedback(); 
+      await _scanFeedback();
       await _sendToBackend(file);
     } catch (e) {
       debugPrint('Error capturing photo: $e');
@@ -164,7 +174,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
           // In custom mode we require an explicit prompt.
           throw ApiException('Missing prompt', statusCode: 400);
         }
-        debugPrint('API: POST /custom (prompt="${prompt.replaceAll('\n', ' ')}")');
+        debugPrint(
+          'API: POST /custom (prompt="${prompt.replaceAll('\n', ' ')}")',
+        );
         json = await _api.sendCustom(image, prompt);
       } else if (_mode == ScanMode.crosswalk) {
         debugPrint('API: POST /crosswalk');
@@ -176,16 +188,16 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
       // Custom mode is one-shot: it resets after one answer.
       if (_mode == ScanMode.custom) {
-         _pendingPrompt = '';
-         _customPromptCandidate = '';
+        _pendingPrompt = '';
+        _customPromptCandidate = '';
 
-         setState(() {
-            _mode = ScanMode.obstacles;
-           _autoScanEnabled = _autoScanBeforeCustom;
-         });
+        setState(() {
+          _mode = ScanMode.obstacles;
+          _autoScanEnabled = _autoScanBeforeCustom;
+        });
 
-         // Restart the auto-scan timer cleanly 
-         _startPictureLoop();
+        // Restart the auto-scan timer cleanly
+        _startPictureLoop();
       }
 
       final resultText = (json['result'] ?? '').toString().trim();
@@ -211,14 +223,14 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         _backendText = message;
       });
       debugPrint('API error: ${e.message}');
-      await _speakIfNeeded(message);
+      await _speakError(message);
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _backendText = _offlineMessage;
       });
       debugPrint('Unexpected error: $e');
-      await _speakIfNeeded(_offlineMessage);
+      await _speakError(_offlineMessage);
     } finally {
       if (mounted) {
         setState(() {
@@ -252,37 +264,123 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     final now = DateTime.now();
     if (now.difference(_lastSpokenAt) < _minSpeakGap) return;
 
-    _lastSpokenAt = now;
-    _lastSpokenText = clean;
-
-    try {
-      await _stopListeningForTts();
-      await _tts.stop();
-      await _tts.speak(clean);
-      _speechMutedUntil = DateTime.now().add(_sttMuteAfterTts);
-      _scheduleListeningResume();
-    } catch (_) {
-      // Ignore TTS failures; UI still shows the text.
-    }
+    await _speak(
+      clean,
+      kind: _SpeechKind.result,
+      interrupt: true,
+      force: false,
+    );
   }
 
-  Future<void> _speakSystem(String text) async {
+  Future<void> _speakError(String text) async {
     final clean = text.trim();
     if (clean.isEmpty) return;
 
-    // System confirmations must be immediate and predictable.
-    _lastSpokenAt = DateTime.now();
-    _lastSpokenText = clean;
-
-    try {
-      await _stopListeningForTts();
-      await _tts.stop();
-      await _tts.speak(clean);
-      _speechMutedUntil = DateTime.now().add(_sttMuteAfterTts);
-      _scheduleListeningResume();
-    } catch (_) {
-      // ignore
+    // Errors must be predictable and non-spammy.
+    final now = DateTime.now();
+    if (clean == _lastErrorText &&
+        now.difference(_lastErrorSpokenAt) < const Duration(seconds: 8)) {
+      return;
     }
+    _lastErrorText = clean;
+    _lastErrorSpokenAt = now;
+
+    await _speak(clean, kind: _SpeechKind.error, interrupt: true, force: false);
+  }
+
+  Future<void> _speakSystem(String text, {bool force = false}) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+    await _speak(
+      clean,
+      kind: _SpeechKind.system,
+      // System confirmations must never interrupt AI results.
+      interrupt: false,
+      force: force,
+    );
+  }
+
+  Future<void> _speak(
+    String text, {
+    required _SpeechKind kind,
+    required bool interrupt,
+    required bool force,
+  }) async {
+    if (_closing) return;
+
+    // If any speech is currently active, never interrupt AI results.
+    // Instead, queue the latest system message to be spoken after.
+    if (kind == _SpeechKind.system && _activeSpeechKind != null) {
+      _queuedSystemUtterance = text;
+      return;
+    }
+
+    _ttsChain = _ttsChain.then((_) async {
+      if (_closing) return;
+
+      // A queued system message might have been updated while waiting.
+      if (kind == _SpeechKind.system && _activeSpeechKind != null) {
+        _queuedSystemUtterance = text;
+        return;
+      }
+
+      if (!force) {
+        // For system messages, lightly dedupe identical repeats.
+        final now = DateTime.now();
+        if (text == _lastSpokenText &&
+            now.difference(_lastSpokenAt) < const Duration(seconds: 2)) {
+          return;
+        }
+      }
+
+      _activeSpeechKind = kind;
+
+      // Mark as spoken when we actually begin speaking.
+      _lastSpokenAt = DateTime.now();
+      _lastSpokenText = text;
+
+      try {
+        // Guarantee: speech never triggers while STT is actively listening.
+        await _stopListeningForTts();
+
+        // Results/errors always interrupt current audio.
+        // System speech will not preempt results/errors due to queuing above.
+        if (interrupt) {
+          await _tts.stop();
+        }
+
+        await _tts.speak(text);
+      } catch (_) {
+        // Ignore TTS failures; UI still shows the text.
+      } finally {
+        _speechMutedUntil = DateTime.now().add(_sttMuteAfterTts);
+        _scheduleListeningResume();
+
+        _activeSpeechKind = null;
+
+        // Speak the latest queued system message after the current utterance.
+        // IMPORTANT: do this inline to avoid awaiting _ttsChain from inside itself.
+        final queued = _queuedSystemUtterance;
+        _queuedSystemUtterance = null;
+        if (queued != null && queued.trim().isNotEmpty && !_closing) {
+          _activeSpeechKind = _SpeechKind.system;
+          _lastSpokenAt = DateTime.now();
+          _lastSpokenText = queued;
+          try {
+            await _stopListeningForTts();
+            await _tts.speak(queued);
+          } catch (_) {
+            // ignore
+          } finally {
+            _speechMutedUntil = DateTime.now().add(_sttMuteAfterTts);
+            _scheduleListeningResume();
+            _activeSpeechKind = null;
+          }
+        }
+      }
+    });
+
+    await _ttsChain;
   }
 
   Future<void> _stopListeningForTts() async {
@@ -309,11 +407,10 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     });
   }
 
-
-  Future <void> _scanFeedback () async {
-    try{ 
-      //Subtle system click sound 
-      SystemSound.play(SystemSoundType.click); 
+  Future<void> _scanFeedback() async {
+    try {
+      // Subtle system click sound
+      SystemSound.play(SystemSoundType.click);
 
       // Short vibration if supported
       final hasVibrator = await Vibration.hasVibrator();
@@ -325,7 +422,6 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     }
   }
 
-
   Future<void> _initSpeech() async {
     final available = await _speech.initialize(
       onStatus: (status) {
@@ -334,7 +430,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
           // If we're in custom mode and we have a candidate prompt but never got
           // a finalResult callback, submit it once the recognizer stops.
-          if (_mode == ScanMode.custom && _customPromptCandidate.trim().isNotEmpty) {
+          if (_mode == ScanMode.custom &&
+              _customPromptCandidate.trim().isNotEmpty) {
             final prompt = _customPromptCandidate.trim();
             _customPromptCandidate = '';
             _pendingPrompt = prompt;
@@ -400,7 +497,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       setState(() {
         _backendText = 'Asking...';
       });
-      Future.microtask(() => _captureAndSendOnce(force: true)); 
+      Future.microtask(() => _captureAndSendOnce(force: true));
     }
   }
 
@@ -421,32 +518,32 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
     String? commandKey;
     VoidCallback? action;
-    
+
     if (lower.contains('close camera')) {
       commandKey = 'close';
       action = () {
         _closeCamera();
-      }; 
-
-   } else if (lower.contains('repeat') || lower.contains('say again')) {
-      commandKey = 'repeat'; 
+      };
+    } else if (lower.contains('repeat') || lower.contains('say again')) {
+      commandKey = 'repeat';
       action = () {
         if (_lastSpokenText.isNotEmpty) {
-          _speakSystem(_lastSpokenText); 
+          _speakSystem(_lastSpokenText, force: true);
         }
       };
-    } else if (lower.contains('stop talking') || lower.contains('be quiet')){
-      commandKey = 'stop_tts'; 
-      action =() async {
-        await _tts.stop(); 
-        _lastSpokenText = ''; 
+    } else if (lower.contains('stop talking') || lower.contains('be quiet')) {
+      commandKey = 'stop_tts';
+      action = () {
+        _tts.stop();
+        _lastSpokenText = '';
         if (mounted) {
           setState(() {
-            _backendText = 'Speech stopped'; 
+            _backendText = 'Speech stopped';
           });
         }
-      };     
-    } else if (lower.contains('pause scanning') || lower.contains('stop scanning')) {
+      };
+    } else if (lower.contains('pause scanning') ||
+        lower.contains('stop scanning')) {
       commandKey = 'pause';
       action = () {
         setState(() {
@@ -455,8 +552,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         });
         _speakSystem('Scanning paused');
       };
-
-    } else if (lower.contains('resume scanning') || lower.contains('start scanning')) {
+    } else if (lower.contains('resume scanning') ||
+        lower.contains('start scanning')) {
       commandKey = 'resume';
       action = () {
         setState(() {
@@ -466,7 +563,6 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         _speakSystem('Scanning resumed');
         _captureAndSendOnce(force: true);
       };
-      
     } else if (lower.contains('obstacle mode') ||
         lower.contains('obstacles mode') ||
         lower == 'obstacles' ||
@@ -484,33 +580,30 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         lower.contains('cross walk mode') ||
         lower == 'crosswalk' ||
         lower == 'cross walk') {
-
       commandKey = 'mode_crosswalk';
       action = () {
         setState(() {
           // Set mode FIRST
           _mode = ScanMode.crosswalk;
-          
+
           // Reset custom-mode state defensively
-          _pendingPrompt = ''; 
-          _customPromptCandidate = ''; 
-          _autoScanEnabled = true; 
+          _pendingPrompt = '';
+          _customPromptCandidate = '';
 
           // UI Feedback
           _backendText = 'Crosswalk mode';
         });
 
-        // System feedback 
+        // System feedback
         _speakSystem('Crosswalk mode');
 
-        // Reset scan loop for safety 
-        _pictureTimer?.cancel(); 
-        _startPictureLoop(); 
+        // Reset scan loop for safety
+        _pictureTimer?.cancel();
+        _startPictureLoop();
 
         // Immediate capture
         _captureAndSendOnce(force: true);
       };
-
     } else if (lower.contains('custom mode') ||
         lower.contains('question mode') ||
         lower.contains('ask question')) {
@@ -518,9 +611,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       action = () {
         _autoScanBeforeCustom = _autoScanEnabled;
 
-        // HARD stop auto scan immediately 
-        _autoScanEnabled = false; 
-        _pictureTimer?.cancel(); 
+        // HARD stop auto scan immediately
+        _autoScanEnabled = false;
+        _pictureTimer?.cancel();
 
         setState(() {
           _mode = ScanMode.custom;
@@ -537,7 +630,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     }
 
     // Prevent duplicate triggers of the same command.
-    if (commandKey == _lastCommandKey && now.difference(_lastCommandAt) < _commandCooldown) {
+    if (commandKey == _lastCommandKey &&
+        now.difference(_lastCommandAt) < _commandCooldown) {
       return true;
     }
 
@@ -609,48 +703,48 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       body: _initializing
           ? const Center(child: CircularProgressIndicator())
           : (controller == null || !controller.value.isInitialized)
-              ? const Center(child: Text('Camera not available'))
-              : Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    CameraPreview(controller),
+          ? const Center(child: Text('Camera not available'))
+          : Stack(
+              fit: StackFit.expand,
+              children: [
+                CameraPreview(controller),
 
-                    // subtitle / result overlay
-                    Positioned(
-                      bottom: 100,
-                      left: 20,
-                      right: 20,
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          overlayText,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
+                // subtitle / result overlay
+                Positioned(
+                  bottom: 100,
+                  left: 20,
+                  right: 20,
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(8),
                     ),
-
-                    Positioned(
-                      left: 16,
-                      right: 16,
-                      bottom: 24,
-                      child: Center(
-                        child: FilledButton(
-                          onPressed: _closeCamera,
-                          child: const Text('Close'),
-                        ),
+                    child: Text(
+                      overlayText,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
                       ),
+                      textAlign: TextAlign.center,
                     ),
-                  ],
+                  ),
                 ),
+
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 24,
+                  child: Center(
+                    child: FilledButton(
+                      onPressed: _closeCamera,
+                      child: const Text('Close'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
     );
   }
 }
