@@ -1,0 +1,53 @@
+seed: 42
+
+model_name: LiquidAI/LFM2-VL-1.6B
+max_seq_length: 2048
+
+dataset_name: pedestrian-mixed-data
+dataset_samples: 6000
+dataset_image_column: image
+# Atenție: păstrăm typo-ul 'colum' pentru a fi compatibil cu codul din config.py
+dataset_label_colum: text_label 
+train_split_ratio: 0.9
+
+label_mapping: {}
+
+system_prompt: |
+  Task: Identify traffic lights and crosswalks.
+  Output ONLY one of the following exact phrases:
+  - "red" (if traffic light is Red)
+  - "green" (if traffic light is Green)
+  - "zebra" (if there is a crosswalk)
+  - "none" (if safe/clear)
+  Do not add any other text. Do not explain.
+
+user_prompt: |
+  Analyze the image from my perspective as a pedestrian.
+  Can I cross the street safely now? What do you see?
+
+learning_rate: 4.0e-5
+num_train_epochs: 3
+batch_size: 2
+gradient_accumulation_steps: 8
+optim: adamw_8bit
+warmup_ratio: 0.1
+weight_decay: 0.01
+logging_steps: 10
+eval_steps: 200
+
+use_peft: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_bias: none
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+modal_app_name: pedestrian-assistant
+checkpoint_path: null

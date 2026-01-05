@@ -1,0 +1,7 @@
+<div (click)="toggleDropdown()">
+    {{ selected() || 'Select an option' }}
+  </div>
+  @if (isOpen()) {
+    <ng-content></ng-content>
+  }
+

@@ -1,0 +1,40 @@
+[project]
+name = "pedestrian-assistant"
+version = "0.1.0"
+description = "Fine-tuning LFM2-VL for pedestrian traffic safety (traffic lights & crosswalks)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers",
+    "datasets",
+    "peft",           # Pentru LoRA
+    "trl",            # Pentru SFTTrainer
+    "wandb",          # Pentru monitorizare experimente
+    "modal",          # Pentru rulare pe cloud GPU
+    "accelerate",
+    "bitsandbytes",   # Pentru optimizare memorie (4-bit/8-bit)
+    "scikit-learn",   # Pentru metrici (accuracy, confusion matrix)
+    "matplotlib",     # Pentru grafice
+    "seaborn",        # Pentru vizualizare matrice confuzie
+    "pillow",         # Procesare imagini
+    "numpy",
+    "pyyaml",         # Parsare config files
+    "ruff",            # Linter & Formatter
+    "pydantic",
+    "pydantic-settings",
+    "outlines>=1.2.9",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "jupyter",
+    "notebook"
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"] # Erori, flake8, isort (import sorting)

@@ -1,3 +1,9 @@
 fastapi
 uvicorn
 python-multipart
+torch
+torchvision
+transformers
+bitsandbytes
+pillow
+accelerate

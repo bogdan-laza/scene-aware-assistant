@@ -1,0 +1,25 @@
+seed: 42
+
+# Calea RELATIVĂ către modelul proaspăt antrenat
+# (Loader-ul va căuta automat în folderul /models din volum)
+model: "LFM2-VL-1.6B-pedestrian-mixed-data-20251217-213115/final"
+
+dataset: "crosswalk-test-only"
+split: "validation"
+n_samples: 500
+image_column: "image"
+label_column: "text_label"
+batch_size: 1
+
+system_prompt: |
+  Task: Identify traffic lights and crosswalks.
+  Output ONLY one of the following exact phrases:
+  - "red" (if traffic light is Red)
+  - "green" (if traffic light is Green)
+  - "zebra" (if there is a crosswalk)
+  - "none" (if safe/clear)
+  Do not add any other text. Do not explain.
+
+user_prompt: |
+  Analyze the image from my perspective as a pedestrian.
+  Can I cross the street safely now? What do you see?
