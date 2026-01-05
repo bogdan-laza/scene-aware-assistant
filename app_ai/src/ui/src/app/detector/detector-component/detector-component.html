@@ -1,0 +1,24 @@
+<div class="container">
+  <div class="detector-window">
+    <h3>Upload Image</h3>
+    <app-file-uploader (fileSelected)="onFileSelected($event)"></app-file-uploader>
+
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>Detection type</mat-label>
+      <mat-select [(value)]="selected">
+        <mat-option value="Crosswalk">Crosswalk</mat-option>
+        <mat-option value="Obstacles">Obstacles</mat-option>
+        <mat-option value="Custom">Custom</mat-option>
+      </mat-select>
+    </mat-form-field>
+
+    <button
+      mat-raised-button color="primary"
+      class="send-btn"
+      (click) = (sendFrame())
+    >
+      Send
+    </button>
+
+  </div>
+</div>

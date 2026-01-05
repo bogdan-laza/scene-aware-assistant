@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:camera/camera.dart';
 import 'package:http/http.dart' as http;
@@ -16,7 +17,9 @@ class ApiException implements Exception {
 class ApiClient {
   ApiClient({String? baseUrl, http.Client? client})
       : baseUrl = baseUrl ?? defaultBaseUrl,
-        _client = client ?? http.Client();
+        _client = client ?? http.Client() {
+    print('API Client initialized with baseUrl: $baseUrl');
+  }
 
   /// Override at build/run time with:
   /// `--dart-define=API_BASE_URL=http://10.0.2.2:8000`
@@ -28,7 +31,8 @@ class ApiClient {
   final String baseUrl;
   final http.Client _client;
 
-  static const Duration _timeout = Duration(seconds: 30);
+  // Increased timeout for CPU inference which can take 60-120 seconds
+  static const Duration _timeout = Duration(seconds: 200);
 
   Uri _uri(String path) => Uri.parse('$baseUrl$path');
 
@@ -44,32 +48,54 @@ class ApiClient {
 
   /// Sends an image + prompt string to `/custom`.
   Future<Map<String, dynamic>> sendCustom(XFile file, String prompt) async {
-    final request = http.MultipartRequest('POST', _uri('/custom'));
+    final uri = _uri('/custom');
+    print('API Client: Sending request to $uri');
+    
+    final request = http.MultipartRequest('POST', uri);
     request.files.add(await _imagePart(file));
     request.fields['prompt'] = prompt;
 
-    final streamed = await _client.send(request).timeout(_timeout);
-    final body = await streamed.stream.bytesToString();
+    try {
+      final streamed = await _client.send(request).timeout(_timeout);
+      final body = await streamed.stream.bytesToString();
 
-    if (streamed.statusCode >= 200 && streamed.statusCode < 300) {
-      return _decodeJsonObject(body);
+      if (streamed.statusCode >= 200 && streamed.statusCode < 300) {
+        return _decodeJsonObject(body);
+      }
+
+      throw _exceptionFromBody(streamed.statusCode, body);
+    } on TimeoutException {
+      print('API Client: Request to $uri timed out after ${_timeout.inSeconds} seconds');
+      throw ApiException('Request timed out. The server may be slow or unreachable. Check your connection and ensure the backend is running.', statusCode: 408);
+    } on http.ClientException catch (e) {
+      print('API Client: Network error connecting to $uri: $e');
+      throw ApiException('Cannot connect to server at $baseUrl. Make sure the backend is running and the URL is correct.', statusCode: null);
     }
-
-    throw _exceptionFromBody(streamed.statusCode, body);
   }
 
   Future<Map<String, dynamic>> _sendImageOnly(String endpoint, XFile file) async {
-    final request = http.MultipartRequest('POST', _uri(endpoint));
+    final uri = _uri(endpoint);
+    print('API Client: Sending request to $uri');
+    
+    final request = http.MultipartRequest('POST', uri);
     request.files.add(await _imagePart(file));
 
-    final streamed = await _client.send(request).timeout(_timeout);
-    final body = await streamed.stream.bytesToString();
+    try {
+      final streamed = await _client.send(request).timeout(_timeout);
+      final body = await streamed.stream.bytesToString();
 
-    if (streamed.statusCode >= 200 && streamed.statusCode < 300) {
-      return _decodeJsonObject(body);
+      if (streamed.statusCode >= 200 && streamed.statusCode < 300) {
+        return _decodeJsonObject(body);
+      }
+
+      throw _exceptionFromBody(streamed.statusCode, body);
+    } on TimeoutException {
+      print('API Client: Request to $uri timed out after ${_timeout.inSeconds} seconds');
+      throw ApiException('Request timed out. The server may be slow or unreachable. Check your connection and ensure the backend is running.', statusCode: 408);
+    } on http.ClientException catch (e) {
+      print('API Client: Network error connecting to $uri: $e');
+      throw ApiException('Cannot connect to server at $baseUrl. Make sure the backend is running and the URL is correct.', statusCode: null);
     }
-
-    throw _exceptionFromBody(streamed.statusCode, body);
   }
 
   Map<String, dynamic> _decodeJsonObject(String body) {

@@ -1,0 +1,36 @@
+.container {
+  display: flex;
+  justify-content: center; /* Horizontal Center */
+  align-items: center;     /* Vertical Center */
+  min-height: 100vh;       /* Full viewport height */
+  background-color: #f5f5f5; /* Light grey background for contrast */
+}
+
+.detector-window {
+  display: flex;
+  flex-direction: column;  /* Stack items vertically */
+  align-items: center;     /* Center items horizontally inside the card */
+  gap: 20px;               /* Space between uploader, select, and button */
+
+  background: white;
+  padding: 32px;
+  border-radius: 12px;     /* Rounded corners */
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1); /* Soft shadow */
+
+  width: 100%;
+  max-width: 400px;        /* Prevents it from getting too wide */
+}
+
+h3 {
+  margin-top: 0;
+  color: #333;
+}
+
+.full-width {
+  width: 100%;
+}
+
+.send-btn {
+  width: 100%;
+  padding: 8px 16px;
+}
