@@ -153,10 +153,13 @@ async def obstacles(file: Optional[UploadFile] = File(None)):
     contents = await file.read()
     image = Image.open(io.BytesIO(contents)).convert("RGB")
 
+    # MODIFIED PROMPT: Safety-focused, explicit warnings, no apologies.
     prompt = (
-        "Analyze this image from a navigation perspective. "
-        "Are there any obstacles directly in front that would block movement? "
-        "Describe them briefly."
+        "You are a safety assistant for a blind pedestrian. "
+        "Analyze this image for immediate dangers. "
+        "If there is a car approaching or a blocking obstacle, warn the user loudly starting with 'Be aware!'. "
+        "Otherwise, briefly describe the path ahead. "
+        "Do not apologize or say 'I might be wrong'."
     )
 
     try:
@@ -183,7 +186,12 @@ async def crosswalk(file: Optional[UploadFile] = File(None)):
     contents = await file.read()
     image = Image.open(io.BytesIO(contents)).convert("RGB")
 
-    prompt = "Identify if there is a pedestrian crosswalk (zebra crossing) in this image."
+    # MODIFIED PROMPT: Focus on blocking vehicles and safety confirmation.
+    prompt = (
+        "Check this image for a pedestrian crosswalk. "
+        "If there is a car blocking it or approaching dangerously, say 'Be aware: Vehicle on crosswalk!'. "
+        "Otherwise, confirm if it is safe to cross."
+    )
 
     try:
         response = run_inference(image, prompt)

@@ -25,14 +25,14 @@ class ApiClient {
   /// `--dart-define=API_BASE_URL=http://10.0.2.2:8000`
   static const String defaultBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://10.0.2.2:8000',
+    defaultValue: 'http://192.168.1.55:8000',
   );
 
   final String baseUrl;
   final http.Client _client;
 
   // Increased timeout for CPU inference which can take 60-120 seconds
-  static const Duration _timeout = Duration(seconds: 200);
+  static const Duration _timeout = Duration(seconds: 400);
 
   Uri _uri(String path) => Uri.parse('$baseUrl$path');
 
