@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:scene_aware_assistant_app/services/sound_service.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:vibration/vibration.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +21,7 @@ class CameraPreviewScreen extends StatefulWidget {
 
 class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   CameraController? _controller;
+  final SoundService _sounds = SoundService();
   Timer? _pictureTimer;
   Timer? _listenResumeTimer;
   List<CameraDescription> _cameras = const [];
@@ -64,7 +66,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   static const Duration _captureInterval = Duration(seconds: 8);
   static const Duration _minRequestGap = Duration(seconds: 8);
   static const Duration _minSpeakGap = Duration(seconds: 4);
-  static const Duration _sttMuteAfterTts = Duration(milliseconds: 1200);
+  static const Duration _sttMuteAfterTts = Duration(milliseconds: 100);
   static const Duration _commandCooldown = Duration(seconds: 2);
 
   @override
@@ -74,6 +76,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     _initCamera();
     _setupTts();
     _initSpeech();
+    _sounds.init();
   }
 
   Future<void> _setupTts() async {
@@ -87,7 +90,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       if (mounted && !_modeSelected) {
         await _speakSystem("Welcome. Please select a mode: Obstacles, Crosswalk, or Custom.", force: true);
         // Only start listening AFTER the system finishes speaking to avoid mic conflict
-        _startListening();
+       _speechMutedUntil = DateTime(0);
+        if (mounted) _startListening();
       }
     });
   }
@@ -233,6 +237,10 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     if (_closing) return;
     if (DateTime.now().isBefore(_speechMutedUntil)) return;
     if (_listening || _speech.isListening) return;
+
+    await _sounds.playMicOpen();
+   
+
     setState(() => _listening = true);
 
     try {
@@ -269,6 +277,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   }
 
   void _handleCustomQuestionSubmit(String question) {
+    _sounds.playMicClose();
     setState(() => _waitingForCustomQuestion = false); // Stop waiting
     // Send it!
     _captureAndSendOnce(explicitPrompt: question);
@@ -322,6 +331,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
       _lastCommandKey = commandKey;
       _lastCommandAt = now;
+      _sounds.playMicClose();
+
       action();
       return true;
     }
@@ -369,22 +380,33 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     await _speak(text, kind: _SpeechKind.system, interrupt: false, force: force);
   }
 
-  Future<void> _speak(String text, {required _SpeechKind kind, required bool interrupt, required bool force}) async {
+ Future<void> _speak(String text, {required _SpeechKind kind, required bool interrupt, required bool force}) async {
     if (_closing) return;
+
+    // We use a Completer so we can await the actual end of speaking
+    final completer = Completer<void>();
+
     _ttsChain = _ttsChain.then((_) async {
       _activeSpeechKind = kind;
       _lastSpokenText = text;
       try {
         await _stopListeningForTts();
         if (interrupt) await _tts.stop();
-        await _tts.speak(text);
-      } catch (_) {}
-      finally {
+        
+        // This 'await' works because we set awaitSpeakCompletion(true) in init
+        await _tts.speak(text); 
+      } catch (_) {
+      } finally {
+        // Signal that this specific utterance is done
+        completer.complete();
+        
         _speechMutedUntil = DateTime.now().add(_sttMuteAfterTts);
         _scheduleListeningResume();
         _activeSpeechKind = null;
       }
     });
+
+    return completer.future;
   }
 
   Future<void> _stopListeningForTts() async {
