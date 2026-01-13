@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:scene_aware_assistant_app/services/sound_service.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:vibration/vibration.dart';
@@ -9,7 +10,8 @@ import 'package:flutter/services.dart';
 
 import '../services/api_client.dart';
 
-enum ScanMode { obstacles, crosswalk, custom }
+enum ScanMode { obstacles, crosswalk, custom, ocr }
+
 enum _SpeechKind { system, result, error }
 
 class CameraPreviewScreen extends StatefulWidget {
@@ -22,6 +24,9 @@ class CameraPreviewScreen extends StatefulWidget {
 class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   CameraController? _controller;
   final SoundService _sounds = SoundService();
+  final TextRecognizer _textRecognizer = TextRecognizer(
+    script: TextRecognitionScript.latin,
+  );
   Timer? _pictureTimer;
   Timer? _listenResumeTimer;
   List<CameraDescription> _cameras = const [];
@@ -38,7 +43,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
   // NEW: State variables for the new flow
   bool _modeSelected = false; // Waits for initial mode selection
-  bool _waitingForCustomQuestion = false; // True after saying "I have a question"
+  bool _waitingForCustomQuestion =
+      false; // True after saying "I have a question"
 
   DateTime _lastCommandAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastCommandKey = '';
@@ -55,11 +61,10 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   DateTime _lastSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastSpokenText = '';
 
+  DateTime _lastOcrAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   // TTS Queue Logic
   Future<void> _ttsChain = Future<void>.value();
-  _SpeechKind? _activeSpeechKind;
-  String? _queuedSystemUtterance;
-
   DateTime _lastErrorSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastErrorText = '';
 
@@ -68,6 +73,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   static const Duration _minSpeakGap = Duration(seconds: 4);
   static const Duration _sttMuteAfterTts = Duration(milliseconds: 100);
   static const Duration _commandCooldown = Duration(seconds: 2);
+  static const Duration _minOcrGap = Duration(seconds: 3);
 
   @override
   void initState() {
@@ -88,9 +94,12 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     // CRITICAL FIX: Wait for TTS to be fully ready, then speak, THEN start listening.
     Future.delayed(const Duration(seconds: 1), () async {
       if (mounted && !_modeSelected) {
-        await _speakSystem("Welcome. Please select a mode: Obstacles, Crosswalk, or Custom.", force: true);
+        await _speakSystem(
+          "Welcome. Please select a mode: Obstacles, Crosswalk, Custom, or Text.",
+          force: true,
+        );
         // Only start listening AFTER the system finishes speaking to avoid mic conflict
-       _speechMutedUntil = DateTime(0);
+        _speechMutedUntil = DateTime(0);
         if (mounted) _startListening();
       }
     });
@@ -100,7 +109,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     try {
       _cameras = await availableCameras();
       final CameraDescription camera = _cameras.firstWhere(
-            (c) => c.lensDirection == CameraLensDirection.back,
+        (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => _cameras.first,
       );
 
@@ -128,23 +137,31 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       if (_closing) return;
       if (!_autoScanEnabled) return;
       // In custom mode, the loop does nothing. It waits for commands.
-      if (_mode == ScanMode.custom) return;
+      if (_mode == ScanMode.custom || _mode == ScanMode.ocr) return;
       await _captureAndSendOnce();
     });
   }
 
   Future<void> _captureAndSendOnce({String? explicitPrompt}) async {
     if (_closing) return;
-    if (!mounted || _controller == null || !_controller!.value.isInitialized) return;
+    if (!mounted || _controller == null || !_controller!.value.isInitialized) {
+      return;
+    }
     if (_controller!.value.isTakingPicture) return;
     if (_sending || _captureInFlight) return;
 
     // In custom mode, we only proceed if we have an explicit prompt passed in
-    if (_mode == ScanMode.custom && (explicitPrompt == null || explicitPrompt.isEmpty)) return;
+    if (_mode == ScanMode.custom &&
+        (explicitPrompt == null || explicitPrompt.isEmpty)) {
+      return;
+    }
 
     final now = DateTime.now();
     // Force allow if custom prompt, otherwise check gap
-    if (explicitPrompt == null && now.difference(_lastRequestAt) < _minRequestGap) return;
+    if (explicitPrompt == null &&
+        now.difference(_lastRequestAt) < _minRequestGap) {
+      return;
+    }
 
     _captureInFlight = true;
     try {
@@ -172,7 +189,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     try {
       Map<String, dynamic> json;
       if (_mode == ScanMode.custom) {
-        if (explicitPrompt == null || explicitPrompt.isEmpty) throw ApiException('Missing prompt');
+        if (explicitPrompt == null || explicitPrompt.isEmpty) {
+          throw ApiException('Missing prompt');
+        }
         json = await _api.sendCustom(image, explicitPrompt);
       } else if (_mode == ScanMode.crosswalk) {
         json = await _api.sendCrosswalk(image);
@@ -186,7 +205,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         _waitingForCustomQuestion = false;
         // We stay in custom mode, but stop processing until next "I have a question"
         setState(() {
-          _backendText = "Answer received. Say 'I have a question' to ask again.";
+          _backendText =
+              "Answer received. Say 'I have a question' to ask again.";
         });
       }
 
@@ -207,6 +227,87 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  Future<void> _captureAndReadTextOnce() async {
+    if (_closing) return;
+    if (!mounted || _controller == null || !_controller!.value.isInitialized) {
+      return;
+    }
+    if (_controller!.value.isTakingPicture) return;
+    if (_sending || _captureInFlight) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastOcrAt) < _minOcrGap) return;
+    _lastOcrAt = now;
+
+    _captureInFlight = true;
+    try {
+      await _speakSystem("Reading text...");
+      setState(() {
+        _backendText = "Reading text...";
+      });
+
+      final XFile file = await _controller!.takePicture();
+      await _scanFeedback();
+      await _runOcr(file);
+    } catch (e) {
+      debugPrint('OCR error: $e');
+      setState(() {
+        _backendText =
+            "Couldn't read text. Try moving closer or improving lighting.";
+      });
+      await _speakError(
+        "I couldn't read text. Try moving closer or improving lighting.",
+      );
+    } finally {
+      _captureInFlight = false;
+    }
+  }
+
+  Future<void> _runOcr(XFile image) async {
+    final inputImage = InputImage.fromFilePath(image.path);
+    final recognizedText = await _textRecognizer.processImage(inputImage);
+
+    final spoken = _formatOcrSpokenText(recognizedText);
+    setState(() {
+      _backendText = spoken;
+    });
+    await _speakIfNeeded(spoken);
+  }
+
+  String _formatOcrSpokenText(RecognizedText recognizedText) {
+    final lines = <String>[];
+    for (final block in recognizedText.blocks) {
+      for (final line in block.lines) {
+        final t = line.text.trim();
+        if (t.isNotEmpty) lines.add(t);
+      }
+    }
+
+    if (lines.isEmpty) {
+      return "No readable text detected. Move closer or adjust the camera.";
+    }
+
+    // Demo-safe: keep it short and readable.
+    const maxLines = 4;
+    const maxChars = 240;
+
+    final take = lines.take(maxLines).toList();
+    var combined = take.join('. ');
+    combined = combined
+        .replaceAll('\n', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (combined.length > maxChars) {
+      combined = combined.substring(0, maxChars).trimRight();
+      combined = '$combined…';
+    }
+
+    if (lines.length > maxLines) {
+      combined = '$combined. More text detected.';
+    }
+    return combined;
   }
 
   String _formatSpokenResult(String resultText) {
@@ -239,15 +340,16 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
     if (_listening || _speech.isListening) return;
 
     await _sounds.playMicOpen();
-   
 
     setState(() => _listening = true);
 
     try {
       await _speech.listen(
         listenOptions: stt.SpeechListenOptions(
-            listenMode: stt.ListenMode.search, // Changed to SEARCH for better compatibility
-            partialResults: true
+          listenMode: stt
+              .ListenMode
+              .search, // Changed to SEARCH for better compatibility
+          partialResults: true,
         ),
         pauseFor: const Duration(seconds: 3),
         onResult: (result) {
@@ -260,7 +362,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
           }
 
           // 2. Handle Custom Question Input
-          if (result.finalResult && _mode == ScanMode.custom && _waitingForCustomQuestion) {
+          if (result.finalResult &&
+              _mode == ScanMode.custom &&
+              _waitingForCustomQuestion) {
             // The user said "I have a question", app said "Listening", now we have the question.
             String question = result.recognizedWords.trim();
             if (question.isNotEmpty) {
@@ -303,9 +407,18 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       action = () => _switchMode(ScanMode.crosswalk, "Crosswalk mode active.");
     } else if (lower.contains('custom') || lower.contains('question mode')) {
       commandKey = 'mode_custom';
-      action = () => _switchMode(ScanMode.custom, "Custom mode. Say 'I have a question' when ready.");
+      action = () => _switchMode(
+        ScanMode.custom,
+        "Custom mode. Say 'I have a question' when ready.",
+      );
+    } else if (lower.contains('text mode') ||
+        lower.contains('ocr mode') ||
+        lower == 'text' ||
+        lower == 'ocr') {
+      commandKey = 'mode_ocr';
+      action = () =>
+          _switchMode(ScanMode.ocr, "Text mode. Say 'read text' when ready.");
     }
-
     // --- CUSTOM MODE TRIGGER ---
     else if (_mode == ScanMode.custom && lower.contains('i have a question')) {
       commandKey = 'trigger_question';
@@ -315,7 +428,14 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
         // We do NOT stop listening here; we wait for the NEXT result which will be the question
       };
     }
-
+    // --- OCR TRIGGER ---
+    else if (_mode == ScanMode.ocr &&
+        (lower.contains('read text') ||
+            lower.contains('scan text') ||
+            lower == 'read')) {
+      commandKey = 'read_text';
+      action = _captureAndReadTextOnce;
+    }
     // --- UTILITIES ---
     else if (lower.contains('close camera')) {
       commandKey = 'close';
@@ -327,7 +447,10 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
 
     if (commandKey != null && action != null) {
       // Prevent duplicates
-      if (commandKey == _lastCommandKey && now.difference(_lastCommandAt) < _commandCooldown) return true;
+      if (commandKey == _lastCommandKey &&
+          now.difference(_lastCommandAt) < _commandCooldown) {
+        return true;
+      }
 
       _lastCommandKey = commandKey;
       _lastCommandAt = now;
@@ -347,8 +470,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       _backendText = speechFeedback;
       _waitingForCustomQuestion = false; // Reset custom state
 
-      // Auto-scan is ON for Obstacles/Crosswalk, OFF for Custom
-      _autoScanEnabled = (newMode != ScanMode.custom);
+      // Auto-scan is ON for Obstacles/Crosswalk, OFF for Custom/OCR
+      _autoScanEnabled =
+          (newMode == ScanMode.obstacles || newMode == ScanMode.crosswalk);
     });
 
     _speakSystem(speechFeedback);
@@ -367,42 +491,65 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   Future<void> _speakIfNeeded(String text) async {
     final clean = text.trim();
     if (clean.isEmpty || clean == _lastSpokenText) return;
-    await _speak(clean, kind: _SpeechKind.result, interrupt: true, force: false);
+
+    final now = DateTime.now();
+    if (now.difference(_lastSpokenAt) < _minSpeakGap) return;
+    _lastSpokenAt = now;
+
+    await _speak(
+      clean,
+      kind: _SpeechKind.result,
+      interrupt: true,
+      force: false,
+    );
   }
 
   Future<void> _speakError(String text) async {
     if (text == _lastErrorText) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastErrorSpokenAt) < _minSpeakGap) return;
+    _lastErrorSpokenAt = now;
+
     _lastErrorText = text;
     await _speak(text, kind: _SpeechKind.error, interrupt: true, force: false);
   }
 
   Future<void> _speakSystem(String text, {bool force = false}) async {
-    await _speak(text, kind: _SpeechKind.system, interrupt: false, force: force);
+    await _speak(
+      text,
+      kind: _SpeechKind.system,
+      interrupt: false,
+      force: force,
+    );
   }
 
- Future<void> _speak(String text, {required _SpeechKind kind, required bool interrupt, required bool force}) async {
+  Future<void> _speak(
+    String text, {
+    required _SpeechKind kind,
+    required bool interrupt,
+    required bool force,
+  }) async {
     if (_closing) return;
 
     // We use a Completer so we can await the actual end of speaking
     final completer = Completer<void>();
 
     _ttsChain = _ttsChain.then((_) async {
-      _activeSpeechKind = kind;
       _lastSpokenText = text;
       try {
         await _stopListeningForTts();
         if (interrupt) await _tts.stop();
-        
+
         // This 'await' works because we set awaitSpeakCompletion(true) in init
-        await _tts.speak(text); 
+        await _tts.speak(text);
       } catch (_) {
       } finally {
         // Signal that this specific utterance is done
         completer.complete();
-        
+
         _speechMutedUntil = DateTime.now().add(_sttMuteAfterTts);
         _scheduleListeningResume();
-        _activeSpeechKind = null;
       }
     });
 
@@ -410,7 +557,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   }
 
   Future<void> _stopListeningForTts() async {
-    try { await _speech.stop(); } catch (_) {}
+    try {
+      await _speech.stop();
+    } catch (_) {}
     if (mounted) setState(() => _listening = false);
   }
 
@@ -424,7 +573,9 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   Future<void> _scanFeedback() async {
     try {
       SystemSound.play(SystemSoundType.click);
-      if (await Vibration.hasVibrator() == true) Vibration.vibrate(duration: 40);
+      if (await Vibration.hasVibrator() == true) {
+        Vibration.vibrate(duration: 40);
+      }
     } catch (_) {}
   }
 
@@ -441,6 +592,7 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   void dispose() {
     _closing = true;
     _pictureTimer?.cancel();
+    _textRecognizer.close();
     _tts.stop();
     _speech.stop();
     _controller?.dispose();
@@ -451,11 +603,13 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   Widget build(BuildContext context) {
     String overlayText;
     if (!_modeSelected) {
-      overlayText = "Say: Obstacles, Crosswalk, or Custom";
+      overlayText = "Say: Obstacles, Crosswalk, Custom, or Text";
     } else if (_sending) {
       overlayText = "Processing scene...";
     } else if (_waitingForCustomQuestion) {
       overlayText = "Listening for question...";
+    } else if (_mode == ScanMode.ocr) {
+      overlayText = _backendText.isEmpty ? "Say 'read text'" : _backendText;
     } else {
       overlayText = _backendText.isEmpty ? _currentWords : _backendText;
     }
@@ -465,45 +619,78 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
       body: _initializing
           ? const Center(child: CircularProgressIndicator())
           : Stack(
-        fit: StackFit.expand,
-        children: [
-          if (_controller != null && _controller!.value.isInitialized)
-            CameraPreview(_controller!),
+              fit: StackFit.expand,
+              children: [
+                if (_controller != null && _controller!.value.isInitialized)
+                  CameraPreview(_controller!),
 
-          // Instructions Overlay
-          Positioned(
-            bottom: 100, left: 20, right: 20,
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(8)),
-              child: Text(
-                overlayText,
-                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                textAlign: TextAlign.center,
-              ),
+                // Instructions Overlay
+                Positioned(
+                  bottom: 100,
+                  left: 20,
+                  right: 20,
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      overlayText,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+
+                // DEBUG MIC BUTTON (Top Right)
+                // Use this if the automatic listener doesn't start!
+                Positioned(
+                  top: 50,
+                  right: 20,
+                  child: IconButton(
+                    icon: const Icon(
+                      Icons.mic,
+                      color: Colors.greenAccent,
+                      size: 36,
+                    ),
+                    onPressed: () {
+                      debugPrint("Manually starting listener...");
+                      _speechMutedUntil = DateTime.now();
+                      _startListening();
+                    },
+                  ),
+                ),
+
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 24,
+                  child: Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_modeSelected && _mode == ScanMode.ocr) ...[
+                          FilledButton(
+                            onPressed: _captureAndReadTextOnce,
+                            child: const Text('Read Text'),
+                          ),
+                          const SizedBox(width: 12),
+                        ],
+                        FilledButton(
+                          onPressed: _closeCamera,
+                          child: const Text('Close'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ),
-
-          // DEBUG MIC BUTTON (Top Right)
-          // Use this if the automatic listener doesn't start!
-          Positioned(
-            top: 50, right: 20,
-            child: IconButton(
-              icon: const Icon(Icons.mic, color: Colors.greenAccent, size: 36),
-              onPressed: () {
-                debugPrint("Manually starting listener...");
-                _speechMutedUntil = DateTime.now();
-                _startListening();
-              },
-            ),
-          ),
-
-          Positioned(
-            left: 0, right: 0, bottom: 24,
-            child: Center(child: FilledButton(onPressed: _closeCamera, child: const Text('Close'))),
-          ),
-        ],
-      ),
     );
   }
 }

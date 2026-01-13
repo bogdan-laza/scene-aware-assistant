@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 
@@ -16,9 +17,11 @@ class ApiException implements Exception {
 
 class ApiClient {
   ApiClient({String? baseUrl, http.Client? client})
-      : baseUrl = baseUrl ?? defaultBaseUrl,
-        _client = client ?? http.Client() {
-    print('API Client initialized with baseUrl: $baseUrl');
+    : baseUrl = baseUrl ?? defaultBaseUrl,
+      _client = client ?? http.Client() {
+    if (kDebugMode) {
+      debugPrint('API Client initialized with baseUrl: $baseUrl');
+    }
   }
 
   /// Override at build/run time with:
@@ -49,8 +52,10 @@ class ApiClient {
   /// Sends an image + prompt string to `/custom`.
   Future<Map<String, dynamic>> sendCustom(XFile file, String prompt) async {
     final uri = _uri('/custom');
-    print('API Client: Sending request to $uri');
-    
+    if (kDebugMode) {
+      debugPrint('API Client: Sending request to $uri');
+    }
+
     final request = http.MultipartRequest('POST', uri);
     request.files.add(await _imagePart(file));
     request.fields['prompt'] = prompt;
@@ -65,18 +70,35 @@ class ApiClient {
 
       throw _exceptionFromBody(streamed.statusCode, body);
     } on TimeoutException {
-      print('API Client: Request to $uri timed out after ${_timeout.inSeconds} seconds');
-      throw ApiException('Request timed out. The server may be slow or unreachable. Check your connection and ensure the backend is running.', statusCode: 408);
+      if (kDebugMode) {
+        debugPrint(
+          'API Client: Request to $uri timed out after ${_timeout.inSeconds} seconds',
+        );
+      }
+      throw ApiException(
+        'Request timed out. The server may be slow or unreachable. Check your connection and ensure the backend is running.',
+        statusCode: 408,
+      );
     } on http.ClientException catch (e) {
-      print('API Client: Network error connecting to $uri: $e');
-      throw ApiException('Cannot connect to server at $baseUrl. Make sure the backend is running and the URL is correct.', statusCode: null);
+      if (kDebugMode) {
+        debugPrint('API Client: Network error connecting to $uri: $e');
+      }
+      throw ApiException(
+        'Cannot connect to server at $baseUrl. Make sure the backend is running and the URL is correct.',
+        statusCode: null,
+      );
     }
   }
 
-  Future<Map<String, dynamic>> _sendImageOnly(String endpoint, XFile file) async {
+  Future<Map<String, dynamic>> _sendImageOnly(
+    String endpoint,
+    XFile file,
+  ) async {
     final uri = _uri(endpoint);
-    print('API Client: Sending request to $uri');
-    
+    if (kDebugMode) {
+      debugPrint('API Client: Sending request to $uri');
+    }
+
     final request = http.MultipartRequest('POST', uri);
     request.files.add(await _imagePart(file));
 
@@ -90,11 +112,23 @@ class ApiClient {
 
       throw _exceptionFromBody(streamed.statusCode, body);
     } on TimeoutException {
-      print('API Client: Request to $uri timed out after ${_timeout.inSeconds} seconds');
-      throw ApiException('Request timed out. The server may be slow or unreachable. Check your connection and ensure the backend is running.', statusCode: 408);
+      if (kDebugMode) {
+        debugPrint(
+          'API Client: Request to $uri timed out after ${_timeout.inSeconds} seconds',
+        );
+      }
+      throw ApiException(
+        'Request timed out. The server may be slow or unreachable. Check your connection and ensure the backend is running.',
+        statusCode: 408,
+      );
     } on http.ClientException catch (e) {
-      print('API Client: Network error connecting to $uri: $e');
-      throw ApiException('Cannot connect to server at $baseUrl. Make sure the backend is running and the URL is correct.', statusCode: null);
+      if (kDebugMode) {
+        debugPrint('API Client: Network error connecting to $uri: $e');
+      }
+      throw ApiException(
+        'Cannot connect to server at $baseUrl. Make sure the backend is running and the URL is correct.',
+        statusCode: null,
+      );
     }
   }
 
@@ -114,7 +148,10 @@ class ApiClient {
       final detail = (decoded is Map && decoded['detail'] != null)
           ? decoded['detail'].toString()
           : null;
-      return ApiException(detail ?? 'Server error ($status)', statusCode: status);
+      return ApiException(
+        detail ?? 'Server error ($status)',
+        statusCode: status,
+      );
     } catch (_) {
       return ApiException('Server error ($status)', statusCode: status);
     }
