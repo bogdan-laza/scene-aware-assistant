@@ -25,7 +25,7 @@ class ApiClient {
   /// `--dart-define=API_BASE_URL=http://10.0.2.2:8000`
   static const String defaultBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://192.168.1.55:8000',
+    defaultValue: 'http://192.168.1.58:8000',
   );
 
   final String baseUrl;
