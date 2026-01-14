@@ -1,40 +1,62 @@
 import os
 import torch
 import io
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Optional, List
 from PIL import Image
-from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig, AutoConfig
 import uvicorn
+from huggingface_hub import login
 
-MODEL_ID = "LiquidAI/LFM2-VL-3B"
+# --- Configuration ---
+# The ID of your fine-tuned model (weights)
+MY_MODEL_ID = "calinMoglan/pedestrian-detector-v1"
+# The ID of the base architecture (used for configuration and processor files)
+BASE_ARCH_ID = "LiquidAI/LFM2-VL-1.6B"
 
-# Global model and processor variables
+# System prompts to guide the model's behavior
+SAFETY_SYSTEM_PROMPT = (
+    "You are a precise safety assistant for a blind pedestrian. "
+    "Output ONLY the requested classification or warning. "
+    "Do NOT repeat the user prompt. Be concise and urgent."
+)
+
+GENERAL_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant describing images for a visually impaired user. "
+    "Be helpful, accurate, and concise."
+)
+
+# Global variables to hold the model in memory
 model = None
 processor = None
-device = None  # Will be set to "cuda" or "cpu" based on availability
+device = None
 
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png"}
-MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB
-
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load and unload the AI model on server startup/shutdown."""
     global model, processor, device
     
-    # Check if CUDA is available
+    # Authenticate with Hugging Face if a token is present
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token:
+        login(token=hf_token)
+    else:
+        print("Warning: No HF_TOKEN found. Make sure you have access to the models.")
+
+    # Determine if we are running on GPU (CUDA) or CPU
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
-    
-    print(f"Server starting... Loading model: {MODEL_ID}")
-    print(f"Using device: {device}")
+    print(f"Server running on: {device}")
 
     try:
+        # Configure 4-bit quantization to reduce memory usage on the GPU
+        bnb_config = None
         if use_cuda:
-            # Use quantization on GPU to save memory
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -42,48 +64,49 @@ async def lifespan(app: FastAPI):
                 bnb_4bit_use_double_quant=True
             )
 
-            model = AutoModelForImageTextToText.from_pretrained(
-                MODEL_ID,
-                quantization_config=bnb_config,
-                device_map={"": 0},
-                torch_dtype=torch.float16
-            )
-        else:
-            # CPU mode: no quantization (bitsandbytes requires CUDA)
-            print("Warning: Running on CPU. This will be slower. Consider using a GPU for better performance.")
-            model = AutoModelForImageTextToText.from_pretrained(
-                MODEL_ID,
-                device_map="cpu",
-                torch_dtype=torch.float32  # Use float32 on CPU for better compatibility
-            )
+        print(f"Loading Configuration from: {BASE_ARCH_ID} ...")
+        # Load the architecture configuration from the original LiquidAI repository
+        # This ensures we have the correct Python code definitions for the model structure
+        config = AutoConfig.from_pretrained(BASE_ARCH_ID, trust_remote_code=True)
+        
+        print(f"Loading Weights from: {MY_MODEL_ID} ...")
+        # Load the actual fine-tuned weights from your repository
+        model = AutoModelForImageTextToText.from_pretrained(
+            MY_MODEL_ID,
+            config=config,
+            quantization_config=bnb_config if use_cuda else None,
+            device_map="auto" if use_cuda else "cpu",
+            dtype=torch.float16 if use_cuda else torch.float32,
+            trust_remote_code=True
+        )
+        
+        print(f"Loading processor from: {BASE_ARCH_ID} ...")
+        # Load the image processor (handles resizing and normalization)
+        processor = AutoProcessor.from_pretrained(
+            BASE_ARCH_ID, 
+            trust_remote_code=True,
+            max_image_tokens=961
+        )
+        print("Model loaded successfully.")
 
-        processor = AutoProcessor.from_pretrained(MODEL_ID)
-        print("Model loaded successfully")
     except Exception as e:
-        print(f"Critical error loading model: {e}")
+        print(f"Error loading models: {e}")
         raise e
     
     yield
-    print("Server shutting down")
-
+    print("Server shutting down.")
 
 app = FastAPI(title="Scene Assistant Backend", lifespan=lifespan)
 
-
-def run_inference(image: Image.Image, prompt_text: str) -> str:
+def run_inference_sync(image: Image.Image, prompt_text: str, system_prompt: str) -> str:
     """
-    Run inference on an image with a text prompt using the loaded model.
+    Helper function to run the model inference synchronously.
+    It prepares the inputs, generates the text, and decodes the output.
+    """
+    global processor, model
     
-    Args:
-        image: PIL Image object
-        prompt_text: Text prompt for the model
-        
-    Returns:
-        Generated text response from the model
-    """
-    global model, processor, device
-
     conversation = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
         {
             "role": "user",
             "content": [
@@ -92,149 +115,149 @@ def run_inference(image: Image.Image, prompt_text: str) -> str:
             ],
         },
     ]
-
+    
     text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
-
-    inputs = processor(images=[image], text=text_prompt, return_tensors="pt").to(device)
+    inputs = processor(images=[image], text=text_prompt, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=200,
+            max_new_tokens=15, 
             do_sample=False,
-            temperature=None,
-            top_p=None
+            repetition_penalty=1.0 
         )
 
-    generated_text = processor.decode(output_ids[0], skip_special_tokens=True)
+    # Decode only the new tokens generated by the model
+    generated_ids = output_ids[:, inputs['input_ids'].shape[1]:]
+    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    
+    return generated_text.strip()
 
-    if "assistant" in generated_text:
-        return generated_text.split("assistant")[-1].strip()
-    return generated_text
+def clean_model_response(raw_text: str, valid_phrases: List[str], default_response: str) -> str:
+    """
+    Validates the model's output against a list of allowed phrases.
+    If the model hallucinates or is too verbose, it falls back to a default.
+    """
+    raw_lower = raw_text.lower()
+    for phrase in valid_phrases:
+        if phrase.lower() in raw_lower:
+            return phrase
+    if len(raw_text) > 100:
+        return default_response
+    return raw_text
 
+async def validate_image(file: Optional[UploadFile]) -> None:
+    """
+    Checks if the uploaded file is a valid image and within size limits.
+    """
+    if file is None: raise HTTPException(status_code=400, detail="Missing file")
+    if file.content_type not in ALLOWED_IMAGE_TYPES: raise HTTPException(status_code=400, detail="File must be an image")
+    data = await file.read()
+    if not data: raise HTTPException(status_code=400, detail="Missing file")
+    if len(data) > MAX_IMAGE_BYTES: raise HTTPException(status_code=400, detail="Image too large")
+    await file.seek(0)
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint to verify server and model are running."""
-    model_status = "loaded" if model is not None and processor is not None else "not loaded"
-    return {
-        "status": "OK",
-        "message": "Server is running smoothly",
-        "model_status": model_status
-    }
-
-
-async def validate_image(file: Optional[UploadFile]) -> None:
-    # NOTE: Accepting File(None) lets us return 400 (contract) instead of 422.
-    if file is None:
-        raise HTTPException(status_code=400, detail="Missing file")
-
-    if file.content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=400, detail="File must be an image")
-
-    # Basic size guardrail (prevents accidental huge uploads).
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Missing file")
-    if len(data) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail="Image too large")
-
-    # Reset for downstream consumers that may need to read again.
-    await file.seek(0)
-
+    return {"status": "OK", "model": MY_MODEL_ID}
 
 @app.post("/obstacles")
 async def obstacles(file: Optional[UploadFile] = File(None)):
+    """
+    Endpoint for detecting immediate dangers (cars, obstacles, etc.).
+    Uses a strict prompt to force the model into specific classification categories.
+    """
     await validate_image(file)
-
-    if model is None or processor is None:
-        raise HTTPException(status_code=503, detail="AI model not loaded")
-
+    if model is None: raise HTTPException(status_code=503, detail="Model not loaded")
+    
     contents = await file.read()
     image = Image.open(io.BytesIO(contents)).convert("RGB")
-
-    # MODIFIED PROMPT: Safety-focused, explicit warnings, no apologies.
+    
     prompt = (
-        "You are a safety assistant for a blind pedestrian. "
-        "Analyze this image for immediate dangers. "
-        "If there is a car approaching or a blocking obstacle, warn the user loudly starting with 'Be aware!'. "
-        "Otherwise, briefly describe the path ahead. "
-        "Do not apologize or say 'I might be wrong'."
+        "Analyze the path ahead. Output ONLY one of the following sentences:\n"
+        "- 'Caution: Car approaching'\n"
+        "- 'Caution: Obstacle on path'\n"
+        "- 'Clear: Path is safe'\n"
+        "- 'Caution: Unpaved surface'"
     )
-
+    
     try:
-        response = run_inference(image, prompt)
-        return JSONResponse(
-            content={
-                "type": "obstacle_detection",
-                "result": response,
-                "confidence": 0.65,  # Default confidence value
-            }
+        raw_response = await asyncio.to_thread(
+            run_inference_sync, image, prompt, SAFETY_SYSTEM_PROMPT
         )
+        
+        valid_options = ["Caution: Car approaching", "Caution: Obstacle on path", "Clear: Path is safe", "Caution: Unpaved surface"]
+        clean_result = clean_model_response(raw_response, valid_options, "Caution: Unknown danger")
+        
+        return JSONResponse(content={"type": "obstacle_detection", "result": clean_result, "confidence": 0.65})
     except Exception as e:
-        print(f"Error in obstacle detection: {e}")
-        raise HTTPException(status_code=500, detail=f"AI processing failed: {str(e)}")
-
+        print(f"Error in obstacles: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/crosswalk")
 async def crosswalk(file: Optional[UploadFile] = File(None)):
+    """
+    Endpoint for detecting pedestrian crosswalks.
+    """
     await validate_image(file)
-
-    if model is None or processor is None:
-        raise HTTPException(status_code=503, detail="AI model not loaded")
-
+    if model is None: raise HTTPException(status_code=503, detail="Model not loaded")
+    
     contents = await file.read()
     image = Image.open(io.BytesIO(contents)).convert("RGB")
 
-    # MODIFIED PROMPT: Focus on blocking vehicles and safety confirmation.
-    prompt = (
-        "Check this image for a pedestrian crosswalk. "
-        "If there is a car blocking it or approaching dangerously, say 'Be aware: Vehicle on crosswalk!'. "
-        "Otherwise, confirm if it is safe to cross."
+    prompt = "Check the path ahead for a pedestrian crosswalk."
+    system_prompt = (
+        "You are an advanced visual assistant for pedestrian safety.\n"
+        "Analyze the image and output ONLY one of the following classification labels:\n"
+        "- \"Safe crosswalk detected\": if a pedestrian crosswalk (white stripes) is clearly visible on the road.\n"
+        "- \"No crosswalk\": if no crosswalk is visible.\n"
+        "Do not provide explanations. Output only the label."
     )
-
+    
     try:
-        response = run_inference(image, prompt)
-        return JSONResponse(
-            content={
-                "type": "crosswalk_analysis",
-                "result": response,
-                "confidence": 0.65,  # Default confidence value
-            }
+        raw_response = await asyncio.to_thread(
+            run_inference_sync, image, prompt, system_prompt
         )
-    except Exception as e:
-        print(f"Error in crosswalk detection: {e}")
-        raise HTTPException(status_code=500, detail=f"AI processing failed: {str(e)}")
 
+        # Log the raw response for monitoring
+        print(f"Debug Crosswalk Model: '{raw_response}'")
+        
+        clean_response = raw_response.replace('"', '').strip()
+        if "Safe crosswalk detected" in clean_response:
+            clean_result = "Safe crosswalk detected"
+        else:
+            clean_result = "No crosswalk"
+            
+        return JSONResponse(content={
+            "type": "crosswalk_analysis", 
+            "result": clean_result, 
+            "confidence": 0.90 
+        })
+    except Exception as e:
+        print(f"Error in crosswalk: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/custom")
 async def custom(file: Optional[UploadFile] = File(None), prompt: Optional[str] = Form(None)):
+    """
+    Endpoint for general user queries (e.g., 'What color is the shirt?').
+    """
     await validate_image(file)
-
-    if prompt is None or not prompt.strip():
-        raise HTTPException(status_code=400, detail="Missing prompt")
-
-    if model is None or processor is None:
-        raise HTTPException(status_code=503, detail="AI model not loaded")
-
-    clean_prompt = prompt.strip()
+    if not prompt or not prompt.strip(): raise HTTPException(status_code=400, detail="Missing prompt")
+    if model is None: raise HTTPException(status_code=503, detail="Model not loaded")
+    
     contents = await file.read()
     image = Image.open(io.BytesIO(contents)).convert("RGB")
-
+    
     try:
-        response = run_inference(image, clean_prompt)
-        return JSONResponse(
-            content={
-                "type": "custom_query",
-                "prompt": clean_prompt,
-                "result": response,
-                "confidence": 0.65,  # Default confidence value
-            }
+        response = await asyncio.to_thread(
+            run_inference_sync, image, prompt.strip(), GENERAL_SYSTEM_PROMPT
         )
+        
+        return JSONResponse(content={"type": "custom_query", "prompt": prompt.strip(), "result": response, "confidence": 0.65})
     except Exception as e:
-        print(f"Error in custom query: {e}")
-        raise HTTPException(status_code=500, detail=f"AI processing failed: {str(e)}")
-
+        print(f"Error in custom: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
