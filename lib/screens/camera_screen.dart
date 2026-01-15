@@ -508,6 +508,8 @@ class _CameraPreviewScreenState extends State<CameraPreviewScreen> {
   bool _closing = false;
   bool _captureInFlight = false;
 
+
+
   final FlutterTts _tts = FlutterTts();
   final stt.SpeechToText _speech = stt.SpeechToText();
   
