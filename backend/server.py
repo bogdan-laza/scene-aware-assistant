@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
             config=config,
             quantization_config=bnb_config if use_cuda else None,
             device_map="auto" if use_cuda else "cpu",
-            dtype=torch.float16 if use_cuda else torch.bfloat16,
+            dtype=torch.float16 if use_cuda else torch.float32,
             trust_remote_code=True
         )
         
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
     print("Server shutting down.")
 
 app = FastAPI(title="Scene Assistant Backend", lifespan=lifespan)
-"""
+
 def run_inference_sync(image: Image.Image, prompt_text: str, system_prompt: str) -> str:
     
    # Helper function to run the model inference synchronously.
@@ -133,46 +133,9 @@ def run_inference_sync(image: Image.Image, prompt_text: str, system_prompt: str)
     generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
     
     return generated_text.strip()
-    """
+    
 
-def run_inference_sync(image: Image.Image, prompt_text: str, system_prompt: str) -> str:
-    global processor, model
-    
-    print("--- STARTING INFERENCE ---")
-    start_time = time.time()
-    
-    conversation = [
-        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": prompt_text},
-            ],
-        },
-    ]
-    
-    print(f"1. Processing Inputs... ({time.time() - start_time:.2f}s)")
-    text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
-    inputs = processor(images=[image], text=text_prompt, return_tensors="pt").to(model.device)
 
-    print(f"2. Generating Answer... ({time.time() - start_time:.2f}s)")
-    with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=15, 
-            do_sample=False,
-            repetition_penalty=1.0 
-        )
-
-    print(f"3. Decoding... ({time.time() - start_time:.2f}s)")
-    generated_ids = output_ids[:, inputs['input_ids'].shape[1]:]
-    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    
-    total_time = time.time() - start_time
-    print(f"--- FINISHED in {total_time:.2f} SECONDS ---")
-    
-    return generated_text.strip()
 
 def clean_model_response(raw_text: str, valid_phrases: List[str], default_response: str) -> str:
     """
